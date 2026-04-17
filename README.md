@@ -6,20 +6,66 @@ Python implementation for checking HushFilter bloom filters for credential membe
 
 The CLI and API accept only:
 - `username + password`
-- precomputed SHA-256 hash (64-char hex digest of `username+password`)
+- precomputed SHA-256 hash (64-char hex digest of `username+nWebbed+password`)
 - CLI: batch credentials from TSV
 - API: batch credentials in the form of username + password, and SHA-256 hashes
 
 ## Quick Start
-
-Instantiate environment:  
+  
 ```
-uv venv
-uv sync
+git clone {this repo}
+
+cp .env.EXAMPLE .env
+[paste in your nWebbed API key into the newly created .env file]
+
+cp manifest.json.EXAMPLE manifest.json
+
+docker compose build
+
+docker compose up
+
+Navigate to http://localhost:8000/ui-sync/
+
+Click on "sync, update manifest, and reload filters"
+
+Wait... You will have large files to download at first. (50+ GB)
+
+When finished, navigate to http://localhost:8000/ui-check/
+
+The prepopulated value should return TRUE when submitted
+
+You can check raw username + password combinations like so:
+
+GET http://localhost:8000/check?username=testusername1@nwebbed.com&password=testpassword1
+
+POST http://localhost:8000/check
+
+{
+  "username": "testusername1@nwebbed.com",
+  "password": "testpassword1"
+}
+
+Internally, raw usernames and passwords are hashed: SHA256(username+nWebbed+password)
+
+Instead of sending raw credentials, you can hash beforehand and check the hash directly:
+
+POST http://localhost:8000/checkhash
+
+{
+    "hash": "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
+}
+
+
+To run the application in TEST MODE with bundled test filters, set HUSHFILTER_TEST_MODE=1 in your .env file.
+
+These username+password combinations should always return TRUE in both test and production modes:
+
+testusername1@nwebbed.com testpassword1
+testusername2@nwebbed.com testpassword2
+testusername3@nwebbed.com testpassword3
+testusername4@nwebbed.com testpassword4
 ```
 
-Acquire Hush filter file(s) and store them in the 'filters' folder.  
-Copy manifest.json.EXAMPLE to manifest.json and update the manifest with the filters you have.  
 
 ### CLI
 ```bash
@@ -44,11 +90,7 @@ uv run hush.py --test --checkhash <sha256_hex_digest>
 # Start API
 uv run uvicorn api:app --reload
 
-# Start API Container in Test mode (comes with bundled test filters)
-docker compose -f docker-compose.test.yml build
-docker compose -f docker-compose.test.yml up -d
-
-# Start API Container in Prod mode
+# Start API Container
 docker compose build
 docker compose up -d
 
@@ -153,22 +195,25 @@ Response:
 Regenerates `manifest.json` from the local `filters/` tree using `helpers/generate_manifest.py`.
 
 ### `POST /sync/reload`
-Closes existing filter mappings and loads the current `manifest.json` into memory without restarting the API process.
+Closes existing filter mappings and loads files from the current `manifest.json` into memory without restarting the API process.
 
 ### `POST /check`
 Request:
 ```json
 {
-  "username": "test",
-  "password": "pass"
+  "username": "testusername1@nwebbed.com",
+  "password": "testpassword1"
 }
 ```
 
 Response:
 ```json
 {
-  "found": true,
-  "matching_filters": ["filters/000_filter1000000.hf"]
+    "test_mode": false,
+    "found": true,
+    "matching_filters": [
+        "filters/202604/20010101_20260401/29_20010101_20260401.hf"
+    ]
 }
 ```
 
@@ -179,8 +224,14 @@ Request:
 ```json
 {
   "credentials": [
-    {"username": "user1", "password": "pass1"},
-    {"username": "user2", "password": "pass2"}
+    {
+      "username": "testusername1@nwebbed.com",
+      "password": "testpassword1"
+    },
+    {
+      "username": "user038_alpha",
+      "password": "DyQE4efLerNH"
+    }
   ]
 }
 ```
@@ -188,8 +239,11 @@ Request:
 Response:
 ```json
 {
-  "total": 2,
-  "found_usernames": ["user1"]
+    "test_mode": false,
+    "total": 2,
+    "found_usernames": [
+        "testusername1@nwebbed.com"
+    ]
 }
 ```
 
@@ -197,15 +251,18 @@ Response:
 Request:
 ```json
 {
-  "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  "hash": "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
 }
 ```
 
 Response:
 ```json
 {
-  "found": true,
-  "matching_filters": ["filters/000_filter1000000.hf"]
+    "test_mode": false,
+    "found": true,
+    "matching_filters": [
+        "filters/202604/20010101_20260401/29_20010101_20260401.hf"
+    ]
 }
 ```
 
@@ -215,45 +272,24 @@ Checks batch SHA-256 hash inputs and returns only hashes that were found.
 Request:
 ```json
 {
-  "hashes": [
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  ]
+    "hashes": [
+        "1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d", // Random
+        "dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e", // Random
+        "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"  // Positive Test Value: testusername1@nwebbed.com testpassword1
+    ]
 }
 ```
 
 Response:
 ```json
 {
-  "total": 2,
+  "total": 3,
   "found_hashes": [
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
   ]
 }
-```
-
-## Library Usage
-
-```python
-from core.filter_core import FilterManager
-
-with FilterManager(manifest_path="manifest.json") as manager:
-    result = manager.check("username", "password")
-    print(result.found)
-
-    hash_result = manager.check_sha256_hash(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    )
-    print(hash_result.found)
 ```
 
 ## Notes
 
 - Bloom filters can produce false positives but not false negatives.
-- Use context managers (or `close()`) to release memory-mapped files.
-
-## Documentation
-
-- `agents.md` for architecture and agent-specific notes
-- `README_HASH.md` for SHA-256 workflow details
-- `DEPLOYMENT.md` for deployment options
