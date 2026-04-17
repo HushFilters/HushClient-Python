@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+import api
+from filter_sync.sync import SyncResult
+
+
+class DummyCheckResult:
+    def __init__(self, found: bool = False, matching_filters: list[str] | None = None):
+        self.found = found
+        self.matching_filters = matching_filters or []
+
+
+class DummyFilterManager:
+    def __init__(self, manifest_path: str | None = None):
+        self.filters = []
+        self.manifest_path = manifest_path
+
+    def close(self) -> None:
+        return None
+
+    def get_stats(self) -> dict:
+        return {"filter_count": 0, "filters": [], "max_nk": 0}
+
+    def check(self, username: str, password: str) -> DummyCheckResult:
+        return DummyCheckResult(found=bool(username and password), matching_filters=["filters/test.hf"])
+
+    def check_batch(self, credentials: list[tuple[str, str]]) -> list[DummyCheckResult]:
+        return [self.check(username, password) for username, password in credentials]
+
+    def check_sha256_hash(self, hash_value: str) -> DummyCheckResult:
+        return DummyCheckResult(found=bool(hash_value), matching_filters=["filters/test.hf"])
+
+    def check_sha256_batch(self, hash_values: list[str]) -> list[DummyCheckResult]:
+        return [self.check_sha256_hash(hash_value) for hash_value in hash_values]
+
+
+def test_root_and_ui_endpoints(monkeypatch) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+    monkeypatch.delenv("HUSHFILTER_TEST_MODE", raising=False)
+
+    with TestClient(api.app) as client:
+        root_response = client.get("/")
+        assert root_response.status_code == 200
+        assert root_response.json()["test_mode"] is False
+        assert root_response.json()["endpoints"]["ui_check"] == "/ui-check"
+        assert root_response.json()["endpoints"]["ui_sync"] == "/ui-sync"
+        assert root_response.json()["endpoints"]["sync_filters"] == "/sync/filters"
+        assert root_response.json()["endpoints"]["sync_apply"] == "/sync/apply"
+        assert root_response.json()["endpoints"]["update_manifest"] == "/sync/manifest"
+        assert root_response.json()["endpoints"]["reload_filters"] == "/sync/reload"
+        assert "ui" not in root_response.json()["endpoints"]
+
+        check_response = client.get("/ui-check/")
+        assert check_response.status_code == 200
+        assert "Breached Credential Check" in check_response.text
+        assert "TEST MODE" not in check_response.text
+        assert "{{TEST_MODE_BANNER}}" not in check_response.text
+
+        sync_response = client.get("/ui-sync/")
+        assert sync_response.status_code == 200
+        assert "sync, update manifest, and reload filters" in sync_response.text
+        assert "/ui-sync/app.js?v=20260417c" in sync_response.text
+        assert "sync filters from nWebbed" in sync_response.text
+        assert "update manifest" in sync_response.text
+        assert "reload with new filters" in sync_response.text
+        assert "TEST MODE" not in sync_response.text
+        assert "{{TEST_MODE_BANNER}}" not in sync_response.text
+
+
+def test_test_mode_is_exposed_in_api_responses_and_ui(monkeypatch) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "1")
+
+    with TestClient(api.app) as client:
+        root_response = client.get("/")
+        assert root_response.status_code == 200
+        assert root_response.json()["test_mode"] is True
+
+        health_response = client.get("/health")
+        assert health_response.status_code == 200
+        assert health_response.json()["test_mode"] is True
+
+        stats_response = client.get("/stats")
+        assert stats_response.status_code == 200
+        assert stats_response.json()["test_mode"] is True
+
+        checkhash_response = client.post("/checkhash", json={"hash": "a" * 64})
+        assert checkhash_response.status_code == 200
+        assert checkhash_response.json()["test_mode"] is True
+
+        validation_response = client.get("/check")
+        assert validation_response.status_code == 422
+        assert validation_response.json()["test_mode"] is True
+
+        check_page_response = client.get("/ui-check/")
+        assert check_page_response.status_code == 200
+        assert "TEST MODE" in check_page_response.text
+
+        sync_page_response = client.get("/ui-sync/")
+        assert sync_page_response.status_code == 200
+        assert "TEST MODE" in sync_page_response.text
+
+
+def test_sync_filters_endpoint_returns_logs(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+
+    def fake_sync_filters() -> SyncResult:
+        logging.getLogger("filter_sync.sync").info("starting filter md5 verification")
+        logging.getLogger("filter_sync.sync").info("finished filter md5 verification")
+        return SyncResult(
+            manifest_path=tmp_path / "filters" / "manifest_current.json",
+            filters_dir=tmp_path / "filters",
+            downloaded=(tmp_path / "filters" / "202604" / "downloaded.zip",),
+            redownloaded=(),
+            verified_existing=(tmp_path / "filters" / "202604" / "existing.zip",),
+        )
+
+    monkeypatch.setattr(api, "sync_filters", fake_sync_filters)
+
+    with TestClient(api.app) as client:
+        response = client.post("/sync/filters")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["test_mode"] is False
+    assert payload["downloaded"] == [str(tmp_path / "filters" / "202604" / "downloaded.zip")]
+    assert payload["verified_existing"] == [str(tmp_path / "filters" / "202604" / "existing.zip")]
+    assert payload["logs"] == [
+        "INFO starting filter md5 verification",
+        "INFO finished filter md5 verification",
+    ]
+
+
+def test_sync_filters_endpoint_returns_failure_logs(monkeypatch) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+
+    def fake_sync_filters() -> SyncResult:
+        logging.getLogger("filter_sync.sync").error("ZIP MD5 mismatch path=filters/a.zip")
+        raise api.SyncError("zip verification failed")
+
+    monkeypatch.setattr(api, "sync_filters", fake_sync_filters)
+
+    with TestClient(api.app) as client:
+        response = client.post("/sync/filters")
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["test_mode"] is False
+    assert payload["detail"] == "zip verification failed"
+    assert payload["logs"] == ["ERROR ZIP MD5 mismatch path=filters/a.zip"]
+
+
+def test_update_manifest_endpoint_returns_logs(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+    monkeypatch.chdir(tmp_path)
+
+    def fake_generate_manifest(filters_dir: str, output_file: str) -> int:
+        Path(output_file).write_text(
+            json.dumps({"version": "1.0", "filters": ["filters/a.hf", "filters/b.hf"]}),
+            encoding="utf-8",
+        )
+        print(f"Generated {output_file} with 2 filters")
+        return 0
+
+    monkeypatch.setattr(api, "generate_manifest", fake_generate_manifest)
+
+    with TestClient(api.app) as client:
+        response = client.post("/sync/manifest")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["test_mode"] is False
+    assert payload["output_file"] == "manifest.json"
+    assert payload["filter_count"] == 2
+    assert payload["logs"] == ["Generated manifest.json with 2 filters"]
+
+
+def test_reload_filters_endpoint_swaps_manager(monkeypatch) -> None:
+    class ReloadableFilterManager(DummyFilterManager):
+        created: list["ReloadableFilterManager"] = []
+
+        def __init__(self, manifest_path: str | None = None):
+            super().__init__(manifest_path=manifest_path)
+            self.closed = False
+            self.filters = [("filters/new.hf", object())]
+            ReloadableFilterManager.created.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+        def get_stats(self) -> dict:
+            return {
+                "filter_count": 1,
+                "filters": ["filters/new.hf"],
+                "max_nk": 7,
+            }
+
+    monkeypatch.setattr(api, "FilterManager", ReloadableFilterManager)
+    api.filter_manager = None
+
+    with TestClient(api.app) as client:
+        startup_manager = ReloadableFilterManager.created[0]
+        response = client.post("/sync/reload")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["test_mode"] is False
+    assert payload["filter_count"] == 1
+    assert payload["filters"] == ["filters/new.hf"]
+    assert payload["logs"] == [
+        "INFO loaded 1 filters from manifest.json",
+        "INFO closed previous filter mappings",
+    ]
+    assert startup_manager.closed is True
+    assert len(ReloadableFilterManager.created) >= 2
+
+
+def test_sync_apply_endpoint_runs_steps_in_sequence(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+    calls: list[str] = []
+
+    def fake_sync() -> api.SyncFiltersResponse:
+        calls.append("sync")
+        return api.SyncFiltersResponse(
+            success=True,
+            manifest_path=str(tmp_path / "filters" / "manifest_current.json"),
+            downloaded=[str(tmp_path / "filters" / "202604" / "downloaded.zip")],
+            redownloaded=[],
+            verified_existing=[str(tmp_path / "filters" / "202604" / "existing.zip")],
+            logs=["INFO sync step complete"],
+        )
+
+    def fake_manifest() -> api.ManifestUpdateResponse:
+        calls.append("manifest")
+        return api.ManifestUpdateResponse(
+            success=True,
+            output_file="manifest.json",
+            filter_count=2,
+            logs=["INFO manifest step complete"],
+        )
+
+    def fake_reload() -> api.ReloadFiltersResponse:
+        calls.append("reload")
+        return api.ReloadFiltersResponse(
+            success=True,
+            filter_count=2,
+            filters=["filters/a.hf", "filters/b.hf"],
+            max_nk=9,
+            logs=["INFO reload step complete"],
+        )
+
+    monkeypatch.setattr(api, "_run_filter_sync_with_logs", fake_sync)
+    monkeypatch.setattr(api, "_run_manifest_update_with_logs", fake_manifest)
+    monkeypatch.setattr(api, "_run_filter_reload_with_logs", fake_reload)
+
+    with TestClient(api.app) as client:
+        response = client.post("/sync/apply")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["test_mode"] is False
+    assert calls == ["sync", "manifest", "reload"]
+    assert payload["downloaded"] == [str(tmp_path / "filters" / "202604" / "downloaded.zip")]
+    assert payload["verified_existing"] == [str(tmp_path / "filters" / "202604" / "existing.zip")]
+    assert payload["output_file"] == "manifest.json"
+    assert payload["filter_count"] == 2
+    assert payload["filters"] == ["filters/a.hf", "filters/b.hf"]
+    assert payload["logs"] == [
+        "INFO starting filter sync, manifest update, and reload sequence",
+        "INFO step 1/3: filter sync",
+        "INFO sync step complete",
+        "INFO step 2/3: manifest update",
+        "INFO manifest step complete",
+        "INFO step 3/3: reload filters",
+        "INFO reload step complete",
+        "INFO completed filter sync, manifest update, and reload sequence",
+    ]
+
+
+def test_sync_apply_endpoint_stops_after_failed_manifest_step(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    api.filter_manager = None
+    calls: list[str] = []
+
+    def fake_sync() -> api.SyncFiltersResponse:
+        calls.append("sync")
+        return api.SyncFiltersResponse(
+            success=True,
+            manifest_path=str(tmp_path / "filters" / "manifest_current.json"),
+            downloaded=[],
+            redownloaded=[],
+            verified_existing=[],
+            logs=["INFO sync step complete"],
+        )
+
+    def fake_manifest() -> api.ManifestUpdateResponse:
+        calls.append("manifest")
+        return api.ManifestUpdateResponse(
+            success=False,
+            output_file="manifest.json",
+            filter_count=0,
+            logs=["ERROR manifest step failed"],
+            detail="generate_manifest failed",
+        )
+
+    def fake_reload() -> api.ReloadFiltersResponse:
+        calls.append("reload")
+        return api.ReloadFiltersResponse(
+            success=True,
+            filter_count=1,
+            filters=["filters/a.hf"],
+            max_nk=1,
+            logs=["INFO reload step complete"],
+        )
+
+    monkeypatch.setattr(api, "_run_filter_sync_with_logs", fake_sync)
+    monkeypatch.setattr(api, "_run_manifest_update_with_logs", fake_manifest)
+    monkeypatch.setattr(api, "_run_filter_reload_with_logs", fake_reload)
+
+    with TestClient(api.app) as client:
+        response = client.post("/sync/apply")
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["test_mode"] is False
+    assert payload["detail"] == "generate_manifest failed"
+    assert calls == ["sync", "manifest"]
+    assert payload["logs"] == [
+        "INFO starting filter sync, manifest update, and reload sequence",
+        "INFO step 1/3: filter sync",
+        "INFO sync step complete",
+        "INFO step 2/3: manifest update",
+        "ERROR manifest step failed",
+        "ERROR sequence stopped during manifest update",
+    ]
+
+
+def test_current_filter_configuration_uses_hushfilter_test_mode(monkeypatch) -> None:
+    monkeypatch.delenv("MANIFEST_PATH", raising=False)
+    monkeypatch.delenv("HUSHFILTER_TEST_MODE", raising=False)
+    monkeypatch.delenv("HUSH_TEST_MODE", raising=False)
+    monkeypatch.delenv("TEST_MODE", raising=False)
+
+    manifest_path = api._current_filter_configuration()
+    assert manifest_path == "manifest.json"
+
+    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "1")
+
+    manifest_path = api._current_filter_configuration()
+    assert manifest_path == "test_manifest.json"
+
+    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "true")
+
+    manifest_path = api._current_filter_configuration()
+    assert manifest_path == "manifest.json"

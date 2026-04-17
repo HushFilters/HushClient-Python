@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HushFilter Sync UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260417c">
+</head>
+<body>
+  <main class="shell">
+    <section class="panel">
+      {{TEST_MODE_BANNER}}
+      <nav class="topbar">
+        <a class="nav-link" href="/ui-check/">Credential Check</a>
+        <a class="nav-link active" href="/ui-sync/">Filter Sync</a>
+      </nav>
+
+      <header class="hero">
+        <p class="eyebrow">nWebbed Delivery</p>
+        <h1>Filter Synchronization</h1>
+        <p class="sub">Fetch the latest manifest from nWebbed, download any missing or stale filter archives, verify their checksums, unpack them into the repository <code>filters</code> tree, and show the resulting logs here.</p>
+      </header>
+
+      <section class="action-card primary-action-card">
+        <div class="action-copy">
+          <h2>Apply Latest Filters</h2>
+          <p>Run filter sync, update <code>manifest.json</code>, and reload the application with the new filters in one sequential operation.</p>
+        </div>
+        <button id="apply-button" class="sync-button full-width" type="button">sync, update manifest, and reload filters</button>
+      </section>
+
+      <section class="action-card">
+        <div class="action-copy">
+          <h2>Manual Steps</h2>
+          <p>Run the filter sync workflow one step at a time when you want to inspect or repeat a specific stage.</p>
+        </div>
+        <div class="button-grid">
+          <button id="sync-button" class="sync-button" type="button">sync filters from nWebbed</button>
+          <button id="manifest-button" class="sync-button secondary" type="button">update manifest</button>
+          <button id="reload-button" class="sync-button tertiary" type="button">reload with new filters</button>
+        </div>
+        <p id="sync-status" class="status">Idle</p>
+      </section>
+
+      <section class="summary-grid">
+        <article class="summary-card">
+          <h2>Downloaded</h2>
+          <p id="downloaded-count" class="metric">0</p>
+        </article>
+        <article class="summary-card">
+          <h2>Loaded Filters</h2>
+          <p id="loaded-count" class="metric">0</p>
+        </article>
+      </section>
+
+      <section class="result-block">
+        <h2>Sync Output</h2>
+        <pre id="sync-output" class="mono">-</pre>
+      </section>
+    </section>
+  </main>
+
+  <script src="/ui-sync/app.js?v=20260417c" defer></script>
+</body>
+</html>

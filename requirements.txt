@@ -1,0 +1,5 @@
+cryptography
+fastapi
+uvicorn
+pydantic
+requests

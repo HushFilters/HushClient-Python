@@ -1,0 +1,27 @@
+services:
+  hushfilter-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Set HUSHFILTER_TEST_MODE=1 to enable test mode (uses test_manifest.json)
+      # - HUSHFILTER_TEST_MODE=${HUSHFILTER_TEST_MODE:-0}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount filters directory for live updates
+      - ./filters:/app/filters:rw
+      - ./manifest.json:/app/manifest.json:rw
+      - ./test_manifest.json:/app/test_manifest.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

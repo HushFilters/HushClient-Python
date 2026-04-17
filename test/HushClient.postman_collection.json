@@ -1,0 +1,331 @@
+{
+  "info": {
+    "_postman_id": "acbb84ff-4aec-4623-8a6c-6d2a1332db5e",
+    "name": "Hush Filters Python Client",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "16094237"
+  },
+  "item": [
+    {
+      "name": "/",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            ""
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "ui-check (HTML)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/ui-check",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "ui-check"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Docs (Swagger, HTML)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/docs",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "docs"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/health",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "health"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Stats",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/stats",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "stats"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Username",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/check?username=user004_alphaDBld6DYyeNdj",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "check"
+          ],
+          "query": [
+            {
+              "key": "username",
+              "value": "user004_alphaDBld6DYyeNdj"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Username",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"username\": \"user004_alphaDBld6DYyeNdj\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/check?username=user004_alphaDBld6DYyeNdj",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "check"
+          ],
+          "query": [
+            {
+              "key": "username",
+              "value": "user004_alphaDBld6DYyeNdj"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Username + Pass",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/check?username=user004_alpha&password=DBld6DYyeNdj",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "check"
+          ],
+          "query": [
+            {
+              "key": "username",
+              "value": "user004_alpha"
+            },
+            {
+              "key": "password",
+              "value": "DBld6DYyeNdj"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Username + Pass",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"username\": \"user004_alpha\",\r\n  \"password\": \"DBld6DYyeNdj\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/check?username=user004_alphaDBld6DYyeNdj",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "check"
+          ],
+          "query": [
+            {
+              "key": "username",
+              "value": "user004_alphaDBld6DYyeNdj"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Batch Username + Pass",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"credentials\": [\r\n    {\r\n      \"username\": \"user004_alphaDBld6DYyeNdj\",\r\n      \"password\": \"\"\r\n    },\r\n    {\r\n      \"username\": \"user038_alpha\",\r\n      \"password\": \"DyQE4efLerNH\"\r\n    }\r\n  ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/check/batch",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "check",
+            "batch"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Checkhash (Sha256)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"hash\": \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/checkhash",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "checkhash"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Checkhash Batch (Sha256)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\",\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\",\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304f\" // Not in test filter\r\n    ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/checkhash/batch",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "checkhash",
+            "batch"
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

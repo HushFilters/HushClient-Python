@@ -1,0 +1,20 @@
+# .dockerignore
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.log
+.git/
+.gitignore
+.env
+venv/
+.venv/
+*.txt.bak
+test_*.tsv
+debug_*.py
+*.hf.txt
+.uv/
