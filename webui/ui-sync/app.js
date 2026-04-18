@@ -50,10 +50,60 @@ function setButtonsDisabled(disabled) {
   document.getElementById("reload-button").disabled = disabled;
 }
 
+let liveLogPollTimer = null;
+
+function renderStatusLogs(payload) {
+  const output = document.getElementById("sync-output");
+  const lines = [];
+
+  if (payload.operation) {
+    lines.push(`operation: ${payload.operation}`);
+  }
+  if (Array.isArray(payload.logs) && payload.logs.length > 0) {
+    lines.push("");
+    lines.push(...payload.logs);
+  }
+
+  if (lines.length > 0) {
+    output.textContent = lines.join("\n");
+  }
+}
+
+async function pollLiveStatus() {
+  try {
+    const response = await fetch("/sync/status", { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return;
+    }
+    if (payload.active || (Array.isArray(payload.logs) && payload.logs.length > 0)) {
+      renderStatusLogs(payload);
+    }
+  } catch (_err) {
+    // Ignore transient polling failures while the main request is still running.
+  }
+}
+
+function startLiveLogPolling() {
+  stopLiveLogPolling();
+  void pollLiveStatus();
+  liveLogPollTimer = window.setInterval(() => {
+    void pollLiveStatus();
+  }, 1000);
+}
+
+function stopLiveLogPolling() {
+  if (liveLogPollTimer !== null) {
+    window.clearInterval(liveLogPollTimer);
+    liveLogPollTimer = null;
+  }
+}
+
 async function runOperation({ endpoint, inProgress, success, failure, onSuccess }) {
   setButtonsDisabled(true);
   setStatus(inProgress);
   document.getElementById("sync-output").textContent = `Starting ${inProgress.toLowerCase()}`;
+  startLiveLogPolling();
 
   try {
     const response = await fetch(endpoint, {
@@ -78,6 +128,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     setStatus("Client error", "bad");
     renderOutput({ detail: err instanceof Error ? err.message : String(err) });
   } finally {
+    stopLiveLogPolling();
     setButtonsDisabled(false);
   }
 }

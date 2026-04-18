@@ -2,21 +2,22 @@
 FastAPI application for HushFilter bloom filter checking.
 Provides REST API endpoints for credential and hash membership checking.
 """
+import json
+import logging
+import os
+import sys
+import threading
 from pathlib import Path
+from contextlib import asynccontextmanager
+from contextlib import redirect_stderr, redirect_stdout
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import List, Optional
-from contextlib import redirect_stderr, redirect_stdout
-import json
-import logging
-import os
-import threading
-from contextlib import asynccontextmanager
 from io import StringIO
 
 from core.filter_core import FilterManager
@@ -28,6 +29,48 @@ from helpers.generate_manifest import generate_manifest
 # Global filter manager
 filter_manager: Optional[FilterManager] = None
 operation_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+
+
+class _SyncOperationLogState:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = False
+        self._operation: str | None = None
+        self._logs: list[str] = []
+
+    def start(self, operation: str) -> None:
+        with self._lock:
+            self._active = True
+            self._operation = operation
+            self._logs = []
+
+    def append(self, line: str) -> None:
+        with self._lock:
+            self._logs.append(line)
+
+    def finish(self) -> None:
+        with self._lock:
+            self._active = False
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "active": self._active,
+                "operation": self._operation,
+                "logs": list(self._logs),
+            }
+
+
+class _LiveSyncLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sync_operation_logs.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+sync_operation_logs = _SyncOperationLogState()
 
 
 def _is_test_mode_enabled() -> bool:
@@ -208,6 +251,13 @@ class SyncApplyResponse(ApiResponse):
     detail: Optional[str] = None
 
 
+class SyncStatusResponse(ApiResponse):
+    """Response model for live sync status polling."""
+    active: bool
+    operation: Optional[str] = None
+    logs: List[str] = Field(default_factory=list)
+
+
 # API Endpoints
 @app.get("/", tags=["General"])
 async def root():
@@ -226,6 +276,7 @@ async def root():
             "batch_hash_check": "/checkhash/batch",
             "sync_filters": "/sync/filters",
             "sync_apply": "/sync/apply",
+            "sync_status": "/sync/status",
             "update_manifest": "/sync/manifest",
             "reload_filters": "/sync/reload",
         }
@@ -411,11 +462,13 @@ async def sync_filters_endpoint():
         raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
 
     try:
+        sync_operation_logs.start("sync_filters")
         response = await run_in_threadpool(_run_filter_sync_with_logs)
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
     finally:
+        sync_operation_logs.finish()
         operation_lock.release()
 
 
@@ -428,11 +481,13 @@ async def sync_apply_endpoint():
         raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
 
     try:
+        sync_operation_logs.start("sync_apply")
         response = await run_in_threadpool(_run_sync_apply_with_logs)
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
     finally:
+        sync_operation_logs.finish()
         operation_lock.release()
 
 
@@ -445,11 +500,13 @@ async def update_manifest_endpoint():
         raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
 
     try:
+        sync_operation_logs.start("sync_manifest")
         response = await run_in_threadpool(_run_manifest_update_with_logs)
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
     finally:
+        sync_operation_logs.finish()
         operation_lock.release()
 
 
@@ -462,31 +519,44 @@ async def reload_filters_endpoint():
         raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
 
     try:
+        sync_operation_logs.start("sync_reload")
         response = await run_in_threadpool(_run_filter_reload_with_logs)
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
     finally:
+        sync_operation_logs.finish()
         operation_lock.release()
+
+
+@app.get("/sync/status", response_model=SyncStatusResponse, tags=["Sync"])
+async def sync_status_endpoint():
+    """Return live logs for the current or most recent sync operation."""
+    return SyncStatusResponse(**sync_operation_logs.snapshot())
 
 
 def _run_filter_sync_with_logs() -> SyncFiltersResponse:
     log_stream = StringIO()
-    handler = logging.StreamHandler(log_stream)
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    formatter = logging.Formatter("%(levelname)s %(message)s")
+    capture_handler = logging.StreamHandler(log_stream)
+    live_handler = _LiveSyncLogHandler()
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    for handler in (capture_handler, live_handler, stdout_handler):
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(formatter)
 
     sync_logger = logging.getLogger("filter_sync")
     previous_level = sync_logger.level
     previous_propagate = sync_logger.propagate
     sync_logger.setLevel(logging.INFO)
     sync_logger.propagate = False
-    sync_logger.addHandler(handler)
+    for handler in (capture_handler, live_handler, stdout_handler):
+        sync_logger.addHandler(handler)
 
     try:
         result = sync_filters()
     except (R2ClientError, SyncError) as exc:
-        handler.flush()
+        capture_handler.flush()
         logs = _split_log_lines(log_stream.getvalue())
         return SyncFiltersResponse(
             success=False,
@@ -494,7 +564,7 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
             detail=str(exc),
         )
     except Exception as exc:
-        handler.flush()
+        capture_handler.flush()
         logs = _split_log_lines(log_stream.getvalue())
         return SyncFiltersResponse(
             success=False,
@@ -502,12 +572,15 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
             detail=f"Unexpected sync error: {exc}",
         )
     finally:
-        sync_logger.removeHandler(handler)
+        for handler in (capture_handler, live_handler, stdout_handler):
+            sync_logger.removeHandler(handler)
         sync_logger.setLevel(previous_level)
         sync_logger.propagate = previous_propagate
-        handler.close()
+        capture_handler.close()
+        live_handler.close()
+        stdout_handler.close()
 
-    handler.flush()
+    capture_handler.flush()
     logs = _split_log_lines(log_stream.getvalue())
     return SyncFiltersResponse(
         success=True,
@@ -580,11 +653,14 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
         "INFO starting filter sync, manifest update, and reload sequence",
         "INFO step 1/3: filter sync",
     ]
+    for line in logs:
+        _append_live_sync_log(line)
 
     sync_response = _run_filter_sync_with_logs()
     logs.extend(sync_response.logs)
     if not sync_response.success:
         logs.append("ERROR sequence stopped during filter sync")
+        _append_live_sync_log("ERROR sequence stopped during filter sync")
         return SyncApplyResponse(
             success=False,
             manifest_path=sync_response.manifest_path,
@@ -596,10 +672,12 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
         )
 
     logs.append("INFO step 2/3: manifest update")
+    _append_live_sync_log("INFO step 2/3: manifest update")
     manifest_response = _run_manifest_update_with_logs()
     logs.extend(manifest_response.logs)
     if not manifest_response.success:
         logs.append("ERROR sequence stopped during manifest update")
+        _append_live_sync_log("ERROR sequence stopped during manifest update")
         return SyncApplyResponse(
             success=False,
             manifest_path=sync_response.manifest_path,
@@ -613,10 +691,12 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
         )
 
     logs.append("INFO step 3/3: reload filters")
+    _append_live_sync_log("INFO step 3/3: reload filters")
     reload_response = _run_filter_reload_with_logs()
     logs.extend(reload_response.logs)
     if not reload_response.success:
         logs.append("ERROR sequence stopped during filter reload")
+        _append_live_sync_log("ERROR sequence stopped during filter reload")
         return SyncApplyResponse(
             success=False,
             manifest_path=sync_response.manifest_path,
@@ -632,6 +712,7 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
         )
 
     logs.append("INFO completed filter sync, manifest update, and reload sequence")
+    _append_live_sync_log("INFO completed filter sync, manifest update, and reload sequence")
     return SyncApplyResponse(
         success=True,
         manifest_path=sync_response.manifest_path,
@@ -696,6 +777,10 @@ def _merge_output_logs(
 
 def _split_log_lines(raw_logs: str) -> List[str]:
     return [line for line in raw_logs.splitlines() if line.strip()]
+
+
+def _append_live_sync_log(line: str) -> None:
+    sync_operation_logs.append(line)
 
 
 if __name__ == "__main__":

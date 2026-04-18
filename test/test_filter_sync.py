@@ -4,13 +4,14 @@ import hashlib
 import io
 import json
 import logging
+import time
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 import requests
 
-from filter_sync.r2_client import R2ClientError
+from filter_sync.r2_client import R2Client, R2ClientError, R2Config
 from filter_sync.sync import (
     SyncError,
     _build_r2_downloader,
@@ -66,6 +67,52 @@ class FakeCredentialSession:
         self.calls.append({"url": url, "json": json, "timeout": timeout})
         if isinstance(self._response, dict):
             return self._response[url]
+        return self._response
+
+
+class FakeStreamingResponse:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        headers: dict[str, str] | None = None,
+        delay_seconds: float = 0.0,
+        status_code: int = 200,
+    ) -> None:
+        self._chunks = chunks
+        self.headers = headers or {}
+        self.delay_seconds = delay_seconds
+        self.status_code = status_code
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size: int):
+        del chunk_size
+        for chunk in self._chunks:
+            if self.delay_seconds:
+                time.sleep(self.delay_seconds)
+            yield chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeStreamingSession:
+    def __init__(self, response: FakeStreamingResponse) -> None:
+        self._response = response
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        stream: bool,
+        timeout: int,
+    ) -> FakeStreamingResponse:
+        del url, headers, stream, timeout
         return self._response
 
 
@@ -482,6 +529,39 @@ def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: P
     assert downloader._config.access_key_id == "access-key"
     assert downloader._config.secret_access_key == "secret-key"
     assert downloader._config.bucket == "hushfilters"
+
+
+def test_r2_client_download_file_logs_periodic_progress(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="filter_sync.r2_client")
+    chunks = [b"a" * (1024 * 1024), b"b" * (1024 * 1024)]
+    total_bytes = sum(len(chunk) for chunk in chunks)
+    response = FakeStreamingResponse(
+        chunks,
+        headers={"Content-Length": str(total_bytes)},
+        delay_seconds=0.2,
+    )
+    client = R2Client(
+        R2Config(
+            endpoint="https://example.r2.cloudflarestorage.com",
+            access_key_id="access-key",
+            secret_access_key="secret-key",
+        ),
+        session=FakeStreamingSession(response),
+        progress_log_interval_seconds=0.1,
+    )
+    destination = tmp_path / "archive.zip"
+
+    client.download_file("filters/archive.zip", destination)
+
+    assert destination.stat().st_size == total_bytes
+    assert response.closed is True
+    assert "Starting download object=s3://hushfilters/filters/archive.zip" in caplog.text
+    assert "Download progress object=s3://hushfilters/filters/archive.zip" in caplog.text
+    assert "downloaded=2.0 MiB total=2.0 MiB" in caplog.text
+    assert "Download complete object=s3://hushfilters/filters/archive.zip" in caplog.text
 
 
 def test_fetch_r2_config_from_nwebbed_rejects_incomplete_response() -> None:
