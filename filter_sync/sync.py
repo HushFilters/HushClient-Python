@@ -572,8 +572,16 @@ def _build_r2_downloader(
     if env_path is not None:
         settings.update(_load_dotenv(env_path))
 
-    config = _fetch_r2_config_from_nwebbed(settings, bucket=bucket)
+    if _has_direct_r2_settings(settings):
+        config = R2Config.from_mapping(settings, bucket=bucket)
+    else:
+        config = _fetch_r2_config_from_nwebbed(settings, bucket=bucket)
     return R2Client(config)
+
+
+def _has_direct_r2_settings(settings: dict[str, str]) -> bool:
+    required_keys = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+    return all(settings.get(key, "").strip() for key in required_keys)
 
 
 def _fetch_r2_config_from_nwebbed(

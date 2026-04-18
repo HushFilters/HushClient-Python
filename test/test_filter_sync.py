@@ -11,7 +11,12 @@ import pytest
 import requests
 
 from filter_sync.r2_client import R2ClientError
-from filter_sync.sync import SyncError, _fetch_r2_config_from_nwebbed, sync_filters
+from filter_sync.sync import (
+    SyncError,
+    _build_r2_downloader,
+    _fetch_r2_config_from_nwebbed,
+    sync_filters,
+)
 
 
 class FakeDownloader:
@@ -445,6 +450,38 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
     assert config.access_key_id == "access-key"
     assert config.secret_access_key == "secret-key"
     assert config.bucket == "hushfilters"
+
+
+def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "R2_ENDPOINT=https://example.r2.cloudflarestorage.com/",
+                "R2_ACCESS_KEY_ID=access-key",
+                "R2_SECRET_ACCESS_KEY=secret-key",
+                "NWEBBED_API_KEY=test-api-key",
+                "NWEBBED_API_URL=https://nwebbed.example.com/r2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def _unexpected_fetch(*args, **kwargs):
+        raise AssertionError("nWebbed credential exchange should not be called")
+
+    monkeypatch.setattr("filter_sync.sync._fetch_r2_config_from_nwebbed", _unexpected_fetch)
+
+    downloader = _build_r2_downloader(
+        env_path=env_path,
+        bucket="hushfilters",
+        project_root=tmp_path,
+    )
+
+    assert downloader._config.endpoint == "https://example.r2.cloudflarestorage.com"
+    assert downloader._config.access_key_id == "access-key"
+    assert downloader._config.secret_access_key == "secret-key"
+    assert downloader._config.bucket == "hushfilters"
 
 
 def test_fetch_r2_config_from_nwebbed_rejects_incomplete_response() -> None:
