@@ -78,11 +78,15 @@ class FakeStreamingResponse:
         headers: dict[str, str] | None = None,
         delay_seconds: float = 0.0,
         status_code: int = 200,
+        error: Exception | None = None,
+        error_after_chunks: int | None = None,
     ) -> None:
         self._chunks = chunks
         self.headers = headers or {}
         self.delay_seconds = delay_seconds
         self.status_code = status_code
+        self.error = error
+        self.error_after_chunks = error_after_chunks
         self.closed = False
 
     def raise_for_status(self) -> None:
@@ -91,18 +95,23 @@ class FakeStreamingResponse:
 
     def iter_content(self, chunk_size: int):
         del chunk_size
+        chunks_emitted = 0
         for chunk in self._chunks:
             if self.delay_seconds:
                 time.sleep(self.delay_seconds)
             yield chunk
+            chunks_emitted += 1
+            if self.error is not None and self.error_after_chunks == chunks_emitted:
+                raise self.error
 
     def close(self) -> None:
         self.closed = True
 
 
 class FakeStreamingSession:
-    def __init__(self, response: FakeStreamingResponse) -> None:
+    def __init__(self, response: FakeStreamingResponse | list[FakeStreamingResponse]) -> None:
         self._response = response
+        self.calls: list[dict[str, object]] = []
 
     def get(
         self,
@@ -112,7 +121,17 @@ class FakeStreamingSession:
         stream: bool,
         timeout: int,
     ) -> FakeStreamingResponse:
-        del url, headers, stream, timeout
+        self.calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "stream": stream,
+                "timeout": timeout,
+            }
+        )
+        if isinstance(self._response, list):
+            assert self._response
+            return self._response.pop(0)
         return self._response
 
 
@@ -562,6 +581,113 @@ def test_r2_client_download_file_logs_periodic_progress(
     assert "Download progress object=s3://hushfilters/filters/archive.zip" in caplog.text
     assert "downloaded=2.0 MiB total=2.0 MiB" in caplog.text
     assert "Download complete object=s3://hushfilters/filters/archive.zip" in caplog.text
+
+
+def test_r2_client_resumes_partial_download_after_connection_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="filter_sync.r2_client")
+    first_chunk = b"a" * (1024 * 1024)
+    second_chunk = b"b" * (1024 * 1024)
+    total_bytes = len(first_chunk) + len(second_chunk)
+    session = FakeStreamingSession(
+        [
+            FakeStreamingResponse(
+                [first_chunk],
+                headers={"Content-Length": str(total_bytes)},
+                error=requests.ConnectionError("socket closed"),
+                error_after_chunks=1,
+            ),
+            FakeStreamingResponse(
+                [second_chunk],
+                headers={
+                    "Content-Length": str(len(second_chunk)),
+                    "Content-Range": f"bytes {len(first_chunk)}-{total_bytes - 1}/{total_bytes}",
+                },
+                status_code=206,
+            ),
+        ]
+    )
+    client = R2Client(
+        R2Config(
+            endpoint="https://example.r2.cloudflarestorage.com",
+            access_key_id="access-key",
+            secret_access_key="secret-key",
+        ),
+        session=session,
+        progress_log_interval_seconds=0.1,
+        download_max_attempts=3,
+        retry_backoff_base_seconds=0.0,
+    )
+    destination = tmp_path / "archive.zip"
+
+    client.download_file("filters/archive.zip", destination)
+
+    assert destination.read_bytes() == first_chunk + second_chunk
+    assert session.calls[0]["headers"].get("Range") is None
+    assert session.calls[1]["headers"]["Range"] == f"bytes={len(first_chunk)}-"
+    assert "Download interrupted object=s3://hushfilters/filters/archive.zip" in caplog.text
+    assert "Resuming download object=s3://hushfilters/filters/archive.zip" in caplog.text
+
+
+def test_sync_filters_keeps_partial_zip_on_failed_download(tmp_path: Path) -> None:
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+    partial_zip_bytes = b"partial-zip-content"
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(b"complete-zip").hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": "20260401_20260408/00_20260401_20260408.hf",
+                    "md5": hashlib.md5(b"payload").hexdigest(),
+                }
+            ],
+        }
+    )
+
+    class InterruptedDownloader(FakeDownloader):
+        def download_file(self, object_key: str, destination: Path) -> None:
+            self.file_requests.append(object_key)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("ab") as handle:
+                handle.write(partial_zip_bytes)
+            raise R2ClientError("temporary network failure")
+
+    downloader = InterruptedDownloader(
+        manifest_payload=manifest_payload,
+        objects={},
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": _make_upload_manifest_payload(
+                "20260401_20260408.zip",
+                hashlib.md5(b"complete-zip").hexdigest(),
+                [
+                    {
+                        "filename": "00_20260401_20260408.hf",
+                        "md5": hashlib.md5(b"payload").hexdigest(),
+                    }
+                ],
+            ),
+        },
+    )
+
+    with pytest.raises(R2ClientError, match="temporary network failure"):
+        sync_filters(base_dir=base_dir, downloader=downloader)
+
+    partial_path = (
+        tmp_path
+        / "filters"
+        / "202604"
+        / "20260401_20260408"
+        / ".20260401_20260408.zip.part"
+    )
+    assert partial_path.read_bytes() == partial_zip_bytes
 
 
 def test_fetch_r2_config_from_nwebbed_rejects_incomplete_response() -> None:

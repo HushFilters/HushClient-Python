@@ -296,32 +296,26 @@ def _download_verified_file(
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path = destination.parent / f".{destination.name}.part"
-    if temp_path.exists():
-        temp_path.unlink()
-
-    try:
-        downloader.download_file(remote_object_key, temp_path)
-        actual_md5 = calculate_md5(temp_path)
-        _log_md5_check(
-            path=destination,
-            expected_md5=expected_md5,
-            actual_md5=actual_md5,
-            source="downloaded",
+    downloader.download_file(remote_object_key, temp_path)
+    actual_md5 = calculate_md5(temp_path)
+    _log_md5_check(
+        path=destination,
+        expected_md5=expected_md5,
+        actual_md5=actual_md5,
+        source="downloaded",
+    )
+    if actual_md5 != expected_md5:
+        logger.error(
+            "ZIP MD5 mismatch path=%s expected=%s actual=%s",
+            destination,
+            expected_md5,
+            actual_md5,
         )
-        if actual_md5 != expected_md5:
-            logger.error(
-                "ZIP MD5 mismatch path=%s expected=%s actual=%s",
-                destination,
-                expected_md5,
-                actual_md5,
-            )
-            raise SyncError(
-                f"MD5 mismatch for {destination}: expected {expected_md5}, got {actual_md5}"
-            )
-        temp_path.replace(destination)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
+        temp_path.unlink(missing_ok=True)
+        raise SyncError(
+            f"MD5 mismatch for {destination}: expected {expected_md5}, got {actual_md5}"
+        )
+    temp_path.replace(destination)
 
 
 def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
