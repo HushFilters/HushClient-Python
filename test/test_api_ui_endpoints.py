@@ -119,6 +119,9 @@ def test_sync_filters_endpoint_returns_logs(monkeypatch, tmp_path: Path) -> None
 
     def fake_sync_filters() -> SyncResult:
         logging.getLogger("filter_sync.sync").info("starting filter md5 verification")
+        logging.getLogger("filter_sync.sync").info(
+            "local filter verification zip=20260401_20260408.zip 5/10 complete - pass"
+        )
         logging.getLogger("filter_sync.sync").info("finished filter md5 verification")
         return SyncResult(
             manifest_path=tmp_path / "filters" / "manifest_current.json",
@@ -141,6 +144,7 @@ def test_sync_filters_endpoint_returns_logs(monkeypatch, tmp_path: Path) -> None
     assert payload["verified_existing"] == [str(tmp_path / "filters" / "202604" / "existing.zip")]
     assert payload["logs"] == [
         "INFO starting filter md5 verification",
+        "INFO local filter verification zip=20260401_20260408.zip 5/10 complete - pass",
         "INFO finished filter md5 verification",
     ]
 

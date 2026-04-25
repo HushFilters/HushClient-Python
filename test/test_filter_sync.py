@@ -486,6 +486,126 @@ def test_sync_filters_skips_download_when_local_filters_match_upload_manifest(
     assert "skipping zip re-download" in caplog.text
 
 
+def test_sync_filters_logs_local_reuse_verification_progress_every_five_checks(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+
+    filters_dir = tmp_path / "filters"
+    local_dir = filters_dir / "202604" / "20260401_20260408"
+    local_dir.mkdir(parents=True)
+    filter_files = {
+        f"{index:02d}_20260401_20260408.hf": f"filter-{index}".encode("utf-8")
+        for index in range(10)
+    }
+    for filename, content in filter_files.items():
+        (local_dir / filename).write_bytes(content)
+
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(b"zip-bytes-not-needed").hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": f"20260401_20260408/{filename}",
+                    "md5": hashlib.md5(content).hexdigest(),
+                }
+                for filename, content in filter_files.items()
+            ],
+        }
+    )
+    upload_manifest_payload = _make_upload_manifest_payload(
+        "20260401_20260408.zip",
+        hashlib.md5(b"zip-bytes-not-needed").hexdigest(),
+        [
+            {
+                "filename": filename,
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+            for filename, content in filter_files.items()
+        ],
+    )
+    downloader = FakeDownloader(
+        manifest_payload=manifest_payload,
+        objects={},
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": upload_manifest_payload,
+        },
+    )
+
+    result = sync_filters(base_dir=base_dir, downloader=downloader)
+
+    assert result.downloaded == ()
+    assert result.redownloaded == ()
+    assert "local filter verification zip=20260401_20260408.zip 5/10 complete - pass" in caplog.text
+    assert "local filter verification zip=20260401_20260408.zip 10/10 complete - pass" in caplog.text
+
+
+def test_sync_filters_logs_downloaded_filter_verification_progress_every_five_checks(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+
+    filter_files = {
+        f"{index:02d}_20260401_20260408.hf": f"filter-{index}".encode("utf-8")
+        for index in range(10)
+    }
+    zip_bytes = _make_zip_bytes(filter_files)
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(zip_bytes).hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": f"20260401_20260408/{filename}",
+                    "md5": hashlib.md5(content).hexdigest(),
+                }
+                for filename, content in filter_files.items()
+            ],
+        }
+    )
+    upload_manifest_payload = _make_upload_manifest_payload(
+        "20260401_20260408.zip",
+        hashlib.md5(zip_bytes).hexdigest(),
+        [
+            {
+                "filename": filename,
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+            for filename, content in filter_files.items()
+        ],
+    )
+    downloader = FakeDownloader(
+        manifest_payload=manifest_payload,
+        objects={
+            "filters/202604/20260401_20260408/20260401_20260408.zip": zip_bytes,
+        },
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": upload_manifest_payload,
+        },
+    )
+
+    result = sync_filters(base_dir=base_dir, downloader=downloader)
+
+    assert len(result.downloaded) == 1
+    assert "local filter verification zip=20260401_20260408.zip 5/10 complete - pass" in caplog.text
+    assert "local filter verification zip=20260401_20260408.zip 10/10 complete - pass" in caplog.text
+
+
 def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
     response = FakeCredentialResponse(
         {

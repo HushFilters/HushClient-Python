@@ -20,6 +20,7 @@ DEFAULT_BUCKET = "hushfilters"
 REMOTE_FILTERS_PREFIX = "filters"
 REMOTE_MANIFEST_NAME = "manifest_current.json"
 REMOTE_UPLOAD_MANIFEST_NAME = "upload_manifest.json"
+LOCAL_FILTER_VERIFICATION_LOG_INTERVAL = 5
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,24 @@ def _log_filter_md5_failure(
     )
 
 
+def _log_local_filter_verification_progress(
+    *,
+    zip_path: Path,
+    completed_checks: int,
+    total_checks: int,
+) -> None:
+    if completed_checks <= 0 or total_checks <= 0:
+        return
+    if completed_checks % LOCAL_FILTER_VERIFICATION_LOG_INTERVAL != 0:
+        return
+    logger.info(
+        "local filter verification zip=%s %d/%d complete - pass",
+        zip_path.name,
+        completed_checks,
+        total_checks,
+    )
+
+
 def _log_upload_manifest_check_failure(
     *,
     zip_path: Path,
@@ -376,7 +395,8 @@ def _location_filters_match_remote_manifest(
         return False
 
     location_dir = local_zip_path.parent
-    for entry in upload_manifest.filter_files:
+    total_filters = len(upload_manifest.filter_files)
+    for completed_checks, entry in enumerate(upload_manifest.filter_files, start=1):
         target_path = _resolve_filter_output_path(location_dir, entry.path)
         if not target_path.exists():
             _log_upload_manifest_check_failure(
@@ -401,6 +421,11 @@ def _location_filters_match_remote_manifest(
                 reason="local_filter_md5_mismatch",
             )
             return False
+        _log_local_filter_verification_progress(
+            zip_path=local_zip_path,
+            completed_checks=completed_checks,
+            total_checks=total_filters,
+        )
     return True
 
 
@@ -417,6 +442,8 @@ def _verify_filters_for_downloaded_zip(
         raise SyncError(f"No filter manifest entries found for downloaded zip {zip_path}")
 
     failures: list[str] = []
+    total_filters = len(expected_files)
+    successful_checks = 0
     for entry in expected_files:
         target_path = _resolve_filter_output_path(location_dir, entry.path)
         if not target_path.exists():
@@ -439,6 +466,14 @@ def _verify_filters_for_downloaded_zip(
             )
             failures.append(
                 f"Filter MD5 mismatch for {target_path}: expected {entry.md5}, got {actual_md5}"
+            )
+            continue
+        successful_checks += 1
+        if not failures:
+            _log_local_filter_verification_progress(
+                zip_path=zip_path,
+                completed_checks=successful_checks,
+                total_checks=total_filters,
             )
 
     if failures:
