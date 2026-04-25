@@ -4,6 +4,8 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -456,6 +458,85 @@ def test_current_filter_configuration_uses_hushfilter_test_mode(monkeypatch) -> 
 
     manifest_path = api._current_filter_configuration()
     assert manifest_path == "manifest.json"
+
+
+def test_auto_update_enabled_only_when_env_is_one(monkeypatch) -> None:
+    monkeypatch.delenv("AUTO_UPDATE_FILTERS", raising=False)
+    assert api._is_auto_update_enabled() is False
+
+    monkeypatch.setenv("AUTO_UPDATE_FILTERS", "0")
+    assert api._is_auto_update_enabled() is False
+
+    monkeypatch.setenv("AUTO_UPDATE_FILTERS", "1")
+    assert api._is_auto_update_enabled() is True
+
+
+def test_configured_auto_update_hour_parses_integer_env(monkeypatch) -> None:
+    monkeypatch.setenv("AUTO_UPDATE_TIME", "23")
+    assert api._configured_auto_update_hour() == 23
+
+    monkeypatch.setenv("AUTO_UPDATE_TIME", "2")
+    assert api._configured_auto_update_hour() == 2
+
+
+def test_configured_auto_update_hour_rejects_invalid_values(monkeypatch) -> None:
+    monkeypatch.delenv("AUTO_UPDATE_TIME", raising=False)
+    assert api._configured_auto_update_hour() is None
+
+    monkeypatch.setenv("AUTO_UPDATE_TIME", "abc")
+    assert api._configured_auto_update_hour() is None
+
+    monkeypatch.setenv("AUTO_UPDATE_TIME", "-1")
+    assert api._configured_auto_update_hour() is None
+
+    monkeypatch.setenv("AUTO_UPDATE_TIME", "24")
+    assert api._configured_auto_update_hour() is None
+
+
+def test_seconds_until_next_auto_update_uses_next_matching_hour() -> None:
+    now = datetime(2026, 4, 25, 21, 30, tzinfo=timezone.utc)
+    assert api._seconds_until_next_auto_update(now, 23) == 5400
+
+
+def test_seconds_until_next_auto_update_rolls_to_next_day_after_hour() -> None:
+    now = datetime(2026, 4, 25, 23, 30, tzinfo=timezone.utc)
+    assert api._seconds_until_next_auto_update(now, 23) == 84600
+
+
+def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_sync_apply() -> api.SyncApplyResponse:
+        calls.append("sync_apply")
+        return api.SyncApplyResponse(success=True, logs=["INFO sequence complete"])
+
+    monkeypatch.setattr(api, "_run_sync_apply_with_logs", fake_sync_apply)
+    api.sync_operation_logs.finish()
+
+    api._run_scheduled_auto_update()
+
+    assert calls == ["sync_apply"]
+    status = api.sync_operation_logs.snapshot()
+    assert status["active"] is False
+    assert status["operation"] == "auto_sync_apply"
+
+
+def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_sync_apply() -> api.SyncApplyResponse:
+        calls.append("sync_apply")
+        return api.SyncApplyResponse(success=True)
+
+    monkeypatch.setattr(api, "_run_sync_apply_with_logs", fake_sync_apply)
+
+    assert api.operation_lock.acquire(blocking=False)
+    try:
+        api._run_scheduled_auto_update()
+    finally:
+        api.operation_lock.release()
+
+    assert calls == []
 
     monkeypatch.setenv("HUSHFILTER_TEST_MODE", "1")
 

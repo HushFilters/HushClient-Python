@@ -58,6 +58,12 @@ POST http://localhost:8000/checkhash
 
 To run the application in TEST MODE with bundled test filters, set HUSHFILTER_TEST_MODE=1 in your .env file.
 
+To enable the built-in daily auto updater, set AUTO_UPDATE_FILTERS=1 and choose the local 24-hour run hour with AUTO_UPDATE_TIME.
+Examples:
+- `AUTO_UPDATE_TIME=23` runs the full sync/apply workflow at 11pm each day
+- `AUTO_UPDATE_TIME=2` runs the full sync/apply workflow at 2am each day
+- `AUTO_UPDATE_FILTERS=0` disables scheduled auto updates
+
 These username+password combinations should always return TRUE in both test and production modes:
 
 testusername1@nwebbed.com testpassword1

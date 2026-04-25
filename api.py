@@ -2,13 +2,16 @@
 FastAPI application for HushFilter bloom filter checking.
 Provides REST API endpoints for credential and hash membership checking.
 """
+import asyncio
 import json
 import logging
 import os
 import sys
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
+from contextlib import suppress
 from contextlib import redirect_stderr, redirect_stdout
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -98,6 +101,7 @@ def _render_ui_page(page_name: str) -> HTMLResponse:
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the application."""
     global filter_manager
+    auto_update_task: asyncio.Task[None] | None = None
     
     # Startup: Load filters
     manifest_path = _current_filter_configuration()
@@ -110,9 +114,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error loading filters: {e}")
         raise
-    
+
+    if _is_auto_update_enabled():
+        auto_update_hour = _configured_auto_update_hour()
+        if auto_update_hour is None:
+            logger.warning(
+                "AUTO_UPDATE_FILTERS=1 but AUTO_UPDATE_TIME=%r is invalid; auto updater is disabled",
+                os.getenv("AUTO_UPDATE_TIME"),
+            )
+        else:
+            logger.info("Starting daily auto-update scheduler for hour %02d:00", auto_update_hour)
+            auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
+
     yield
-    
+
+    if auto_update_task is not None:
+        auto_update_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await auto_update_task
+
     # Shutdown: Close filters
     if filter_manager:
         filter_manager.close()
@@ -762,6 +782,71 @@ def _current_filter_configuration() -> str:
     is_test_mode = _is_test_mode_enabled()
     default_manifest = "test_manifest.json" if is_test_mode else "manifest.json"
     return os.getenv("MANIFEST_PATH", default_manifest)
+
+
+def _is_auto_update_enabled() -> bool:
+    return os.getenv("AUTO_UPDATE_FILTERS", "").strip() == "1"
+
+
+def _configured_auto_update_hour() -> int | None:
+    raw_hour = os.getenv("AUTO_UPDATE_TIME", "").strip()
+    if not raw_hour:
+        return None
+
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return None
+
+    if hour < 0 or hour > 23:
+        return None
+
+    return hour
+
+
+def _seconds_until_next_auto_update(now: datetime, update_hour: int) -> float:
+    next_run = now.replace(hour=update_hour, minute=0, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    return (next_run - now).total_seconds()
+
+
+async def _auto_update_scheduler_loop() -> None:
+    while True:
+        update_hour = _configured_auto_update_hour()
+        if update_hour is None:
+            logger.warning("Stopping auto-update scheduler because AUTO_UPDATE_TIME is invalid")
+            return
+
+        now = datetime.now().astimezone()
+        sleep_seconds = _seconds_until_next_auto_update(now, update_hour)
+        next_run = now + timedelta(seconds=sleep_seconds)
+        logger.info("Next auto update scheduled for %s", next_run.isoformat(timespec="seconds"))
+
+        await asyncio.sleep(sleep_seconds)
+        await asyncio.to_thread(_run_scheduled_auto_update)
+
+
+def _run_scheduled_auto_update() -> None:
+    if not operation_lock.acquire(blocking=False):
+        logger.info("Skipping scheduled auto update because another filter operation is already in progress")
+        return
+
+    try:
+        sync_operation_logs.start("auto_sync_apply")
+        logger.info("Starting scheduled filter sync, manifest update, and reload sequence")
+        response = _run_sync_apply_with_logs()
+        if response.success:
+            logger.info("Scheduled filter sync, manifest update, and reload completed successfully")
+            return
+
+        logger.error(
+            "Scheduled filter sync, manifest update, and reload failed: %s",
+            response.detail or "unknown error",
+        )
+    finally:
+        sync_operation_logs.finish()
+        operation_lock.release()
 
 
 def _merge_output_logs(
