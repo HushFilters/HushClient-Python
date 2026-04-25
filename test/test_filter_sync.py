@@ -638,6 +638,29 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
     assert config.bucket == "hushfilters"
 
 
+def test_fetch_r2_config_from_nwebbed_prefers_bucket_from_response() -> None:
+    response = FakeCredentialResponse(
+        {
+            "R2_ENDPOINT": "https://example.r2.cloudflarestorage.com/",
+            "R2_ACCESS_KEY_ID": "access-key",
+            "R2_SECRET_ACCESS_KEY": "secret-key",
+            "R2_BUCKET": "custom-response-bucket",
+        }
+    )
+    session = FakeCredentialSession(response)
+
+    config = _fetch_r2_config_from_nwebbed(
+        {
+            "NWEBBED_API_KEY": "test-api-key",
+            "NWEBBED_API_URL": "https://nwebbed.example.com/r2",
+        },
+        bucket="hushfilters",
+        session=session,
+    )
+
+    assert config.bucket == "custom-response-bucket"
+
+
 def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(
@@ -668,6 +691,36 @@ def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: P
     assert downloader._config.access_key_id == "access-key"
     assert downloader._config.secret_access_key == "secret-key"
     assert downloader._config.bucket == "hushfilters"
+
+
+def test_build_r2_downloader_uses_bucket_from_direct_r2_settings(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "R2_ENDPOINT=https://example.r2.cloudflarestorage.com/",
+                "R2_ACCESS_KEY_ID=access-key",
+                "R2_SECRET_ACCESS_KEY=secret-key",
+                "R2_BUCKET=custom-env-bucket",
+                "NWEBBED_API_KEY=test-api-key",
+                "NWEBBED_API_URL=https://nwebbed.example.com/r2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def _unexpected_fetch(*args, **kwargs):
+        raise AssertionError("nWebbed credential exchange should not be called")
+
+    monkeypatch.setattr("filter_sync.sync._fetch_r2_config_from_nwebbed", _unexpected_fetch)
+
+    downloader = _build_r2_downloader(
+        env_path=env_path,
+        bucket="hushfilters",
+        project_root=tmp_path,
+    )
+
+    assert downloader._config.bucket == "custom-env-bucket"
 
 
 def test_r2_client_download_file_logs_periodic_progress(
