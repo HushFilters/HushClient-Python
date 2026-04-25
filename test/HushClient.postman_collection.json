@@ -1,7 +1,7 @@
 {
   "info": {
-    "_postman_id": "acbb84ff-4aec-4623-8a6c-6d2a1332db5e",
-    "name": "Hush Filters Python Client",
+    "_postman_id": "d749d0c0-bf70-4980-bfbb-b5dc7c622588",
+    "name": "Hush Filters Client",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_exporter_id": "16094237"
   },
@@ -39,6 +39,25 @@
           "port": "8000",
           "path": [
             "ui-check"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "ui-sync (HTML)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/ui-sync",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "ui-sync"
           ]
         }
       },
@@ -102,71 +121,12 @@
       "response": []
     },
     {
-      "name": "Check Username",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "http://localhost:8000/check?username=user004_alphaDBld6DYyeNdj",
-          "protocol": "http",
-          "host": [
-            "localhost"
-          ],
-          "port": "8000",
-          "path": [
-            "check"
-          ],
-          "query": [
-            {
-              "key": "username",
-              "value": "user004_alphaDBld6DYyeNdj"
-            }
-          ]
-        }
-      },
-      "response": []
-    },
-    {
-      "name": "Check Username",
-      "request": {
-        "method": "POST",
-        "header": [],
-        "body": {
-          "mode": "raw",
-          "raw": "{\r\n  \"username\": \"user004_alphaDBld6DYyeNdj\"\r\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "url": {
-          "raw": "http://localhost:8000/check?username=user004_alphaDBld6DYyeNdj",
-          "protocol": "http",
-          "host": [
-            "localhost"
-          ],
-          "port": "8000",
-          "path": [
-            "check"
-          ],
-          "query": [
-            {
-              "key": "username",
-              "value": "user004_alphaDBld6DYyeNdj"
-            }
-          ]
-        }
-      },
-      "response": []
-    },
-    {
       "name": "Check Username + Pass",
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/check?username=user004_alpha&password=DBld6DYyeNdj",
+          "raw": "http://localhost:8000/check?username=testusername1@nwebbed.com&password=testpassword1",
           "protocol": "http",
           "host": [
             "localhost"
@@ -178,11 +138,11 @@
           "query": [
             {
               "key": "username",
-              "value": "user004_alpha"
+              "value": "testusername1@nwebbed.com"
             },
             {
               "key": "password",
-              "value": "DBld6DYyeNdj"
+              "value": "testpassword1"
             }
           ]
         }
@@ -196,7 +156,7 @@
         "header": [],
         "body": {
           "mode": "raw",
-          "raw": "{\r\n  \"username\": \"user004_alpha\",\r\n  \"password\": \"DBld6DYyeNdj\"\r\n}",
+          "raw": "{\r\n  \"username\": \"testusername1@nwebbed.com\",\r\n  \"password\": \"testpassword1\"\r\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -204,7 +164,7 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/check?username=user004_alphaDBld6DYyeNdj",
+          "raw": "http://localhost:8000/check",
           "protocol": "http",
           "host": [
             "localhost"
@@ -212,12 +172,6 @@
           "port": "8000",
           "path": [
             "check"
-          ],
-          "query": [
-            {
-              "key": "username",
-              "value": "user004_alphaDBld6DYyeNdj"
-            }
           ]
         }
       },
@@ -236,7 +190,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\r\n  \"credentials\": [\r\n    {\r\n      \"username\": \"user004_alphaDBld6DYyeNdj\",\r\n      \"password\": \"\"\r\n    },\r\n    {\r\n      \"username\": \"user038_alpha\",\r\n      \"password\": \"DyQE4efLerNH\"\r\n    }\r\n  ]\r\n}",
+          "raw": "{\r\n  \"credentials\": [\r\n    {\r\n      \"username\": \"testusername1@nwebbed.com\",\r\n      \"password\": \"testpassword1\"\r\n    },\r\n    {\r\n      \"username\": \"user038_alpha\",\r\n      \"password\": \"DyQE4efLerNH\"\r\n    }\r\n  ]\r\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -271,7 +225,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\r\n    \"hash\": \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\"\r\n}",
+          "raw": "{\r\n    \"hash\": \"29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9\"\r\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -305,7 +259,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\",\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\",\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304f\" // Not in test filter\r\n    ]\r\n}",
+          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\", // Random\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\", // Random\r\n        \"29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9\"  // Positive Test Value: testusername1@nwebbed.com testpassword1\r\n    ]\r\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -322,6 +276,184 @@
           "path": [
             "checkhash",
             "batch"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Sync New Filters",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/sync/filters",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "sync",
+            "filters"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Update Local Manifest With New Filters",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\", // Random\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\", // Random\r\n        \"29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9\"  // Positive Test Value: testusername1@nwebbed.com testpassword1\r\n    ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/sync/manifest",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "sync",
+            "manifest"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Reload Running Application With New Filters",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\", // Random\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\", // Random\r\n        \"29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9\"  // Positive Test Value: testusername1@nwebbed.com testpassword1\r\n    ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/sync/reload",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "sync",
+            "reload"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "End-to-end Download Filters, Apply, Reload",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\", // Random\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\", // Random\r\n        \"29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9\"  // Positive Test Value: testusername1@nwebbed.com testpassword1\r\n    ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/sync/apply",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "sync",
+            "apply"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Status of Ongoing Syncs",
+      "protocolProfileBehavior": {
+        "disableBodyPruning": true
+      },
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"hashes\": [\r\n        \"1e8ce99fda5de7cb95dc4d32261ffbb6e495fcaffde224a0751efa45d4867c2d\", // Random\r\n        \"dfce80097de4de11f760b9ff85902c55e9ae66826d802c0941f215b5cd41304e\", // Random\r\n        \"29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9\"  // Positive Test Value: testusername1@nwebbed.com testpassword1\r\n    ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8000/sync/status",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "sync",
+            "status"
           ]
         }
       },
