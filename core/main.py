@@ -1,6 +1,7 @@
 import struct
 import mmap
 import gzip
+import os
 import random
 from pprint import pprint
 
@@ -25,16 +26,46 @@ class HushFilterError(Exception):
 
 class HushFilter:
     def __init__(self, path: str):
-        # Open the file and memory-map it for reading
-        self.f = open(path, "rb")
-        self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
-        
-        # Parse the header from the memory-mapped file
-        self.header = self.parse_header()
-        self.public_key = self.decode_public_key(self.header['sauth'])
+        self.path = path
+        self.f = None
+        self.mm = None
 
-        # Load filter data location based on header information
-        self.load_filter()
+        file_handle = None
+        mapped_file = None
+        try:
+            # Open the file and memory-map it for reading.
+            file_handle = open(path, "rb")
+            mapped_file = mmap.mmap(file_handle.fileno(), 0, access=mmap.ACCESS_READ)
+            self.mm = mapped_file
+
+            # Parse the header from the memory-mapped file.
+            self.header = self.parse_header()
+            self.public_key = self.decode_public_key(self.header['sauth'])
+
+            # Load filter data location based on header information.
+            self.load_filter()
+
+            # On POSIX the mmap remains usable after the underlying FD is closed.
+            # Releasing the FD here keeps reloads from exhausting the process open-file limit.
+            if os.name != "nt":
+                file_handle.close()
+                self.f = None
+            else:
+                self.f = file_handle
+        except Exception:
+            if mapped_file is not None:
+                try:
+                    mapped_file.close()
+                except Exception:
+                    pass
+            if file_handle is not None:
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
+            self.mm = None
+            self.f = None
+            raise
 
     def parse_header(self) -> dict:
         header = {}
@@ -215,6 +246,26 @@ class HushFilter:
                 return False
 
         return True
+
+    def close(self) -> None:
+        if self.mm is not None:
+            try:
+                self.mm.close()
+            except Exception:
+                pass
+            finally:
+                self.mm = None
+
+        if self.f is not None:
+            try:
+                self.f.close()
+            except Exception:
+                pass
+            finally:
+                self.f = None
+
+    def __del__(self):
+        self.close()
     
 def main():
     # Load filter from .hf file
