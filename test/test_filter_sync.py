@@ -271,6 +271,10 @@ def test_sync_filters_downloads_unpacks_and_verifies_filters(
     assert extracted_file_two.read_bytes() == downloaded_filters["01_20260401_20260408.hf"]
     assert (filters_dir / "manifest_current.json").read_text(encoding="utf-8") == manifest_payload
     assert "starting filter md5 verification" in caplog.text
+    assert "extracting filter archive zip=20260401_20260408.zip" in caplog.text
+    assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=2" in caplog.text
+    assert "verifying extracted filters zip=20260401_20260408.zip total_filters=2" in caplog.text
+    assert "finished verifying extracted filters zip=20260401_20260408.zip total_filters=2" in caplog.text
     assert "finished filter md5 verification" in caplog.text
     assert "source=filter" not in caplog.text
 
@@ -391,6 +395,9 @@ def test_sync_filters_logs_filter_verification_failures(
         tmp_path / "filters" / "202604" / "20260401_20260408" / "20260401_20260408.zip"
     ).exists()
     assert "starting filter md5 verification" in caplog.text
+    assert "extracting filter archive zip=20260401_20260408.zip" in caplog.text
+    assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=1" in caplog.text
+    assert "verifying extracted filters zip=20260401_20260408.zip total_filters=1" in caplog.text
     assert "finished filter md5 verification" not in caplog.text
     assert "Filter MD5 verification failed" in caplog.text
 
@@ -604,6 +611,65 @@ def test_sync_filters_logs_downloaded_filter_verification_progress_every_five_ch
     assert len(result.downloaded) == 1
     assert "local filter verification zip=20260401_20260408.zip 5/10 complete - pass" in caplog.text
     assert "local filter verification zip=20260401_20260408.zip 10/10 complete - pass" in caplog.text
+
+
+def test_sync_filters_logs_downloaded_filter_extraction_progress_for_large_archive(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+
+    filter_files = {
+        f"{index:02d}_20260401_20260408.hf": f"filter-{index}".encode("utf-8")
+        for index in range(30)
+    }
+    zip_bytes = _make_zip_bytes(filter_files)
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(zip_bytes).hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": f"20260401_20260408/{filename}",
+                    "md5": hashlib.md5(content).hexdigest(),
+                }
+                for filename, content in filter_files.items()
+            ],
+        }
+    )
+    upload_manifest_payload = _make_upload_manifest_payload(
+        "20260401_20260408.zip",
+        hashlib.md5(zip_bytes).hexdigest(),
+        [
+            {
+                "filename": filename,
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+            for filename, content in filter_files.items()
+        ],
+    )
+    downloader = FakeDownloader(
+        manifest_payload=manifest_payload,
+        objects={
+            "filters/202604/20260401_20260408/20260401_20260408.zip": zip_bytes,
+        },
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": upload_manifest_payload,
+        },
+    )
+
+    result = sync_filters(base_dir=base_dir, downloader=downloader)
+
+    assert len(result.downloaded) == 1
+    assert "extracting filter archive zip=20260401_20260408.zip" in caplog.text
+    assert "local filter extraction zip=20260401_20260408.zip 25/30 members complete" in caplog.text
+    assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=30" in caplog.text
 
 
 def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:

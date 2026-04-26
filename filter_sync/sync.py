@@ -21,6 +21,7 @@ REMOTE_FILTERS_PREFIX = "filters"
 REMOTE_MANIFEST_NAME = "manifest_current.json"
 REMOTE_UPLOAD_MANIFEST_NAME = "upload_manifest.json"
 LOCAL_FILTER_VERIFICATION_LOG_INTERVAL = 5
+LOCAL_FILTER_EXTRACTION_LOG_INTERVAL = 25
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,24 @@ def _log_local_filter_verification_progress(
     )
 
 
+def _log_local_filter_extraction_progress(
+    *,
+    zip_path: Path,
+    extracted_members: int,
+    total_members: int,
+) -> None:
+    if extracted_members <= 0 or total_members <= 0:
+        return
+    if extracted_members % LOCAL_FILTER_EXTRACTION_LOG_INTERVAL != 0:
+        return
+    logger.info(
+        "local filter extraction zip=%s %d/%d members complete",
+        zip_path.name,
+        extracted_members,
+        total_members,
+    )
+
+
 def _log_upload_manifest_check_failure(
     *,
     zip_path: Path,
@@ -339,6 +358,16 @@ def _download_verified_file(
 
 def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
     with ZipFile(zip_path) as archive:
+        file_members = [member for member in archive.infolist() if member.filename and not member.is_dir()]
+        total_members = len(file_members)
+        logger.info(
+            "extracting filter archive zip=%s destination=%s members=%d",
+            zip_path.name,
+            destination_dir,
+            total_members,
+        )
+
+        extracted_members = 0
         for member in archive.infolist():
             member_path = PurePosixPath(member.filename)
             if not member.filename:
@@ -354,6 +383,18 @@ def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member, "r") as source, target_path.open("wb") as destination:
                 shutil.copyfileobj(source, destination)
+            extracted_members += 1
+            _log_local_filter_extraction_progress(
+                zip_path=zip_path,
+                extracted_members=extracted_members,
+                total_members=total_members,
+            )
+
+        logger.info(
+            "finished extracting filter archive zip=%s extracted_members=%d",
+            zip_path.name,
+            extracted_members,
+        )
 
 
 def _location_filters_match_remote_manifest(
@@ -443,6 +484,11 @@ def _verify_filters_for_downloaded_zip(
 
     failures: list[str] = []
     total_filters = len(expected_files)
+    logger.info(
+        "verifying extracted filters zip=%s total_filters=%d",
+        zip_path.name,
+        total_filters,
+    )
     successful_checks = 0
     for entry in expected_files:
         target_path = _resolve_filter_output_path(location_dir, entry.path)
@@ -478,6 +524,12 @@ def _verify_filters_for_downloaded_zip(
 
     if failures:
         raise SyncError("; ".join(failures))
+
+    logger.info(
+        "finished verifying extracted filters zip=%s total_filters=%d",
+        zip_path.name,
+        total_filters,
+    )
 
 
 def _resolve_filter_output_path(
