@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -688,13 +689,19 @@ def _fetch_r2_config_from_nwebbed(
 
     active_session = session or requests.Session()
     candidate_urls = _credential_api_urls(api_url)
+    machine_id = _machine_id_from_mac()
     last_error: requests.RequestException | None = None
     response = None
     for candidate_url in candidate_urls:
         try:
-            response = active_session.post(
+            params: dict[str, str] = {}
+            if machine_id is not None:
+                params["machine_id"] = machine_id
+
+            response = active_session.get(
                 candidate_url,
-                json={"api_key": api_key},
+                headers={"HFKey": api_key},
+                params=params,
                 timeout=60,
             )
             response.raise_for_status()
@@ -730,6 +737,18 @@ def _fetch_r2_config_from_nwebbed(
         ),
         bucket=_configured_r2_bucket(payload, default_bucket=bucket),
     )
+
+
+def _machine_id_from_mac() -> str | None:
+    mac_address = uuid.getnode()
+
+    # Per uuid.getnode docs, the multicast bit being set means Python likely
+    # synthesized a random node value instead of discovering a real MAC.
+    if (mac_address >> 40) & 0x01:
+        return None
+
+    mac_bytes = mac_address.to_bytes(6, byteorder="big", signed=False)
+    return hashlib.sha256(mac_bytes).hexdigest()
 
 
 def _credential_api_urls(api_url: str) -> tuple[str, ...]:

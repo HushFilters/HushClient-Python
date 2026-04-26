@@ -18,6 +18,9 @@ git clone {this repo}
 cp .env.EXAMPLE .env
 [paste in your nWebbed API key into the newly created .env file]
 
+When direct R2 credentials are not set, the client fetches them from `NWEBBED_API_URL`
+using `GET` with header `HFKey: <NWEBBED_API_KEY>`.
+
 cp manifest.json.EXAMPLE manifest.json
 
 docker compose build

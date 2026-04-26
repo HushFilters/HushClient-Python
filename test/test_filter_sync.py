@@ -16,6 +16,7 @@ from filter_sync.sync import (
     SyncError,
     _build_r2_downloader,
     _fetch_r2_config_from_nwebbed,
+    _machine_id_from_mac,
     sync_filters,
 )
 
@@ -63,8 +64,22 @@ class FakeCredentialSession:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
-    def post(self, url: str, json: dict[str, str], timeout: int) -> FakeCredentialResponse:
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, str],
+        timeout: int,
+    ) -> FakeCredentialResponse:
+        self.calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "params": dict(params),
+                "timeout": timeout,
+            }
+        )
         if isinstance(self._response, dict):
             return self._response[url]
         return self._response
@@ -672,7 +687,7 @@ def test_sync_filters_logs_downloaded_filter_extraction_progress_for_large_archi
     assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=30" in caplog.text
 
 
-def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
+def test_fetch_r2_config_from_nwebbed_uses_get_with_hfkey_header(monkeypatch) -> None:
     response = FakeCredentialResponse(
         {
             "R2_ENDPOINT": "https://example.r2.cloudflarestorage.com/",
@@ -681,6 +696,7 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
         }
     )
     session = FakeCredentialSession(response)
+    monkeypatch.setattr("filter_sync.sync._machine_id_from_mac", lambda: "machine-id-hash")
 
     config = _fetch_r2_config_from_nwebbed(
         {
@@ -694,7 +710,8 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
     assert session.calls == [
         {
             "url": "https://nwebbed.example.com/r2",
-            "json": {"api_key": "test-api-key"},
+            "headers": {"HFKey": "test-api-key"},
+            "params": {"machine_id": "machine-id-hash"},
             "timeout": 60,
         }
     ]
@@ -725,6 +742,36 @@ def test_fetch_r2_config_from_nwebbed_prefers_bucket_from_response() -> None:
     )
 
     assert config.bucket == "custom-response-bucket"
+
+
+def test_fetch_r2_config_from_nwebbed_omits_machine_id_when_unavailable(monkeypatch) -> None:
+    response = FakeCredentialResponse(
+        {
+            "R2_ENDPOINT": "https://example.r2.cloudflarestorage.com/",
+            "R2_ACCESS_KEY_ID": "access-key",
+            "R2_SECRET_ACCESS_KEY": "secret-key",
+        }
+    )
+    session = FakeCredentialSession(response)
+    monkeypatch.setattr("filter_sync.sync._machine_id_from_mac", lambda: None)
+
+    _fetch_r2_config_from_nwebbed(
+        {
+            "NWEBBED_API_KEY": "test-api-key",
+            "NWEBBED_API_URL": "https://nwebbed.example.com/r2",
+        },
+        bucket="hushfilters",
+        session=session,
+    )
+
+    assert session.calls == [
+        {
+            "url": "https://nwebbed.example.com/r2",
+            "headers": {"HFKey": "test-api-key"},
+            "params": {},
+            "timeout": 60,
+        }
+    ]
 
 
 def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: Path) -> None:
@@ -944,7 +991,8 @@ def test_fetch_r2_config_from_nwebbed_rejects_incomplete_response() -> None:
         )
 
 
-def test_fetch_r2_config_from_nwebbed_retries_r2_suffix_for_base_url() -> None:
+def test_fetch_r2_config_from_nwebbed_retries_r2_suffix_for_base_url(monkeypatch) -> None:
+    monkeypatch.setattr("filter_sync.sync._machine_id_from_mac", lambda: None)
     session = FakeCredentialSession(
         {
             "https://nwebbed.example.com": FakeCredentialResponse({}, status_code=404),
@@ -967,8 +1015,34 @@ def test_fetch_r2_config_from_nwebbed_retries_r2_suffix_for_base_url() -> None:
         session=session,
     )
 
-    assert [call["url"] for call in session.calls] == [
-        "https://nwebbed.example.com",
-        "https://nwebbed.example.com/r2",
+    assert session.calls == [
+        {
+            "url": "https://nwebbed.example.com",
+            "headers": {"HFKey": "test-api-key"},
+            "params": {},
+            "timeout": 60,
+        },
+        {
+            "url": "https://nwebbed.example.com/r2",
+            "headers": {"HFKey": "test-api-key"},
+            "params": {},
+            "timeout": 60,
+        },
     ]
     assert config.endpoint == "https://example.r2.cloudflarestorage.com"
+
+
+def test_machine_id_from_mac_hashes_real_mac(monkeypatch) -> None:
+    monkeypatch.setattr("filter_sync.sync.uuid.getnode", lambda: 0x001122334455)
+
+    value = _machine_id_from_mac()
+
+    assert value == hashlib.sha256(bytes.fromhex("001122334455")).hexdigest()
+
+
+def test_machine_id_from_mac_returns_none_for_random_node(monkeypatch) -> None:
+    monkeypatch.setattr("filter_sync.sync.uuid.getnode", lambda: 0x010203040506)
+
+    value = _machine_id_from_mac()
+
+    assert value is None
