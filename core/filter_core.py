@@ -191,9 +191,8 @@ class FilterManager:
         """Close all open filter files."""
         for _, hf in self.filters:
             try:
-                hf.mm.close()
-                hf.f.close()
-            except:
+                hf.close()
+            except Exception:
                 pass
     
     def __enter__(self):

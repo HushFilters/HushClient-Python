@@ -18,6 +18,9 @@ git clone {this repo}
 cp .env.EXAMPLE .env
 [paste in your nWebbed API key into the newly created .env file]
 
+When direct R2 credentials are not set, the client fetches them from `NWEBBED_API_URL`
+using `GET` with header `HFKey: <NWEBBED_API_KEY>`.
+
 cp manifest.json.EXAMPLE manifest.json
 
 docker compose build
@@ -57,6 +60,12 @@ POST http://localhost:8000/checkhash
 
 
 To run the application in TEST MODE with bundled test filters, set HUSHFILTER_TEST_MODE=1 in your .env file.
+
+To enable the built-in daily auto updater, set AUTO_UPDATE_FILTERS=1 and choose the local 24-hour run hour with AUTO_UPDATE_TIME.
+Examples:
+- `AUTO_UPDATE_TIME=23` runs the full sync/apply workflow at 11pm each day
+- `AUTO_UPDATE_TIME=2` runs the full sync/apply workflow at 2am each day
+- `AUTO_UPDATE_FILTERS=0` disables scheduled auto updates
 
 These username+password combinations should always return TRUE in both test and production modes:
 
@@ -165,12 +174,16 @@ Behavior:
 - `/ui-sync` calls `POST /sync/apply`, `POST /sync/filters`, `POST /sync/manifest`, and `POST /sync/reload` and renders the outputs on screen
 
 ### `POST /sync/apply`
-Runs the full filter refresh sequence in order:
+Starts the full filter refresh sequence in a background worker and immediately returns `202 Accepted`.
+
+Sequence:
 1. `POST /sync/filters`
 2. `POST /sync/manifest`
 3. `POST /sync/reload`
 
-Each step waits for the previous step to finish. If any step fails, the sequence stops and returns the combined logs collected so far.
+Each step waits for the previous step to finish. If any step fails, the sequence stops.
+
+Poll `GET /sync/status` for live logs and the final result payload. Once `active` becomes `false`, the operation is complete and the status payload contains the final `success`, `detail`, logs, and any apply result fields such as `downloaded`, `manifest_path`, `output_file`, and `filter_count`.
 
 ### `POST /sync/filters`
 Triggers the filter sync workflow, including manifest download, zip verification, extraction, and filter MD5 verification.

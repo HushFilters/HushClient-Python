@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -20,6 +21,8 @@ DEFAULT_BUCKET = "hushfilters"
 REMOTE_FILTERS_PREFIX = "filters"
 REMOTE_MANIFEST_NAME = "manifest_current.json"
 REMOTE_UPLOAD_MANIFEST_NAME = "upload_manifest.json"
+LOCAL_FILTER_VERIFICATION_LOG_INTERVAL = 5
+LOCAL_FILTER_EXTRACTION_LOG_INTERVAL = 25
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +268,42 @@ def _log_filter_md5_failure(
     )
 
 
+def _log_local_filter_verification_progress(
+    *,
+    zip_path: Path,
+    completed_checks: int,
+    total_checks: int,
+) -> None:
+    if completed_checks <= 0 or total_checks <= 0:
+        return
+    if completed_checks % LOCAL_FILTER_VERIFICATION_LOG_INTERVAL != 0:
+        return
+    logger.info(
+        "local filter verification zip=%s %d/%d complete - pass",
+        zip_path.name,
+        completed_checks,
+        total_checks,
+    )
+
+
+def _log_local_filter_extraction_progress(
+    *,
+    zip_path: Path,
+    extracted_members: int,
+    total_members: int,
+) -> None:
+    if extracted_members <= 0 or total_members <= 0:
+        return
+    if extracted_members % LOCAL_FILTER_EXTRACTION_LOG_INTERVAL != 0:
+        return
+    logger.info(
+        "local filter extraction zip=%s %d/%d members complete",
+        zip_path.name,
+        extracted_members,
+        total_members,
+    )
+
+
 def _log_upload_manifest_check_failure(
     *,
     zip_path: Path,
@@ -296,36 +335,40 @@ def _download_verified_file(
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path = destination.parent / f".{destination.name}.part"
-    if temp_path.exists():
-        temp_path.unlink()
-
-    try:
-        downloader.download_file(remote_object_key, temp_path)
-        actual_md5 = calculate_md5(temp_path)
-        _log_md5_check(
-            path=destination,
-            expected_md5=expected_md5,
-            actual_md5=actual_md5,
-            source="downloaded",
+    downloader.download_file(remote_object_key, temp_path)
+    actual_md5 = calculate_md5(temp_path)
+    _log_md5_check(
+        path=destination,
+        expected_md5=expected_md5,
+        actual_md5=actual_md5,
+        source="downloaded",
+    )
+    if actual_md5 != expected_md5:
+        logger.error(
+            "ZIP MD5 mismatch path=%s expected=%s actual=%s",
+            destination,
+            expected_md5,
+            actual_md5,
         )
-        if actual_md5 != expected_md5:
-            logger.error(
-                "ZIP MD5 mismatch path=%s expected=%s actual=%s",
-                destination,
-                expected_md5,
-                actual_md5,
-            )
-            raise SyncError(
-                f"MD5 mismatch for {destination}: expected {expected_md5}, got {actual_md5}"
-            )
-        temp_path.replace(destination)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
+        temp_path.unlink(missing_ok=True)
+        raise SyncError(
+            f"MD5 mismatch for {destination}: expected {expected_md5}, got {actual_md5}"
+        )
+    temp_path.replace(destination)
 
 
 def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
     with ZipFile(zip_path) as archive:
+        file_members = [member for member in archive.infolist() if member.filename and not member.is_dir()]
+        total_members = len(file_members)
+        logger.info(
+            "extracting filter archive zip=%s destination=%s members=%d",
+            zip_path.name,
+            destination_dir,
+            total_members,
+        )
+
+        extracted_members = 0
         for member in archive.infolist():
             member_path = PurePosixPath(member.filename)
             if not member.filename:
@@ -341,6 +384,18 @@ def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member, "r") as source, target_path.open("wb") as destination:
                 shutil.copyfileobj(source, destination)
+            extracted_members += 1
+            _log_local_filter_extraction_progress(
+                zip_path=zip_path,
+                extracted_members=extracted_members,
+                total_members=total_members,
+            )
+
+        logger.info(
+            "finished extracting filter archive zip=%s extracted_members=%d",
+            zip_path.name,
+            extracted_members,
+        )
 
 
 def _location_filters_match_remote_manifest(
@@ -382,7 +437,8 @@ def _location_filters_match_remote_manifest(
         return False
 
     location_dir = local_zip_path.parent
-    for entry in upload_manifest.filter_files:
+    total_filters = len(upload_manifest.filter_files)
+    for completed_checks, entry in enumerate(upload_manifest.filter_files, start=1):
         target_path = _resolve_filter_output_path(location_dir, entry.path)
         if not target_path.exists():
             _log_upload_manifest_check_failure(
@@ -407,6 +463,11 @@ def _location_filters_match_remote_manifest(
                 reason="local_filter_md5_mismatch",
             )
             return False
+        _log_local_filter_verification_progress(
+            zip_path=local_zip_path,
+            completed_checks=completed_checks,
+            total_checks=total_filters,
+        )
     return True
 
 
@@ -423,6 +484,13 @@ def _verify_filters_for_downloaded_zip(
         raise SyncError(f"No filter manifest entries found for downloaded zip {zip_path}")
 
     failures: list[str] = []
+    total_filters = len(expected_files)
+    logger.info(
+        "verifying extracted filters zip=%s total_filters=%d",
+        zip_path.name,
+        total_filters,
+    )
+    successful_checks = 0
     for entry in expected_files:
         target_path = _resolve_filter_output_path(location_dir, entry.path)
         if not target_path.exists():
@@ -446,9 +514,23 @@ def _verify_filters_for_downloaded_zip(
             failures.append(
                 f"Filter MD5 mismatch for {target_path}: expected {entry.md5}, got {actual_md5}"
             )
+            continue
+        successful_checks += 1
+        if not failures:
+            _log_local_filter_verification_progress(
+                zip_path=zip_path,
+                completed_checks=successful_checks,
+                total_checks=total_filters,
+            )
 
     if failures:
         raise SyncError("; ".join(failures))
+
+    logger.info(
+        "finished verifying extracted filters zip=%s total_filters=%d",
+        zip_path.name,
+        total_filters,
+    )
 
 
 def _resolve_filter_output_path(
@@ -572,16 +654,21 @@ def _build_r2_downloader(
     if env_path is not None:
         settings.update(_load_dotenv(env_path))
 
+    resolved_bucket = _configured_r2_bucket(settings, default_bucket=bucket)
     if _has_direct_r2_settings(settings):
-        config = R2Config.from_mapping(settings, bucket=bucket)
+        config = R2Config.from_mapping(settings, bucket=resolved_bucket)
     else:
-        config = _fetch_r2_config_from_nwebbed(settings, bucket=bucket)
+        config = _fetch_r2_config_from_nwebbed(settings, bucket=resolved_bucket)
     return R2Client(config)
 
 
 def _has_direct_r2_settings(settings: dict[str, str]) -> bool:
     required_keys = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
     return all(settings.get(key, "").strip() for key in required_keys)
+
+
+def _configured_r2_bucket(settings: dict[str, str], *, default_bucket: str = DEFAULT_BUCKET) -> str:
+    return settings.get("R2_BUCKET", "").strip() or default_bucket
 
 
 def _fetch_r2_config_from_nwebbed(
@@ -602,13 +689,19 @@ def _fetch_r2_config_from_nwebbed(
 
     active_session = session or requests.Session()
     candidate_urls = _credential_api_urls(api_url)
+    machine_id = _machine_id_from_mac()
     last_error: requests.RequestException | None = None
     response = None
     for candidate_url in candidate_urls:
         try:
-            response = active_session.post(
+            params: dict[str, str] = {}
+            if machine_id is not None:
+                params["machine_id"] = machine_id
+
+            response = active_session.get(
                 candidate_url,
-                json={"api_key": api_key},
+                headers={"HFKey": api_key},
+                params=params,
                 timeout=60,
             )
             response.raise_for_status()
@@ -642,8 +735,20 @@ def _fetch_r2_config_from_nwebbed(
             "R2 secret access key",
             "R2_SECRET_ACCESS_KEY",
         ),
-        bucket=bucket,
+        bucket=_configured_r2_bucket(payload, default_bucket=bucket),
     )
+
+
+def _machine_id_from_mac() -> str | None:
+    mac_address = uuid.getnode()
+
+    # Per uuid.getnode docs, the multicast bit being set means Python likely
+    # synthesized a random node value instead of discovering a real MAC.
+    if (mac_address >> 40) & 0x01:
+        return None
+
+    mac_bytes = mac_address.to_bytes(6, byteorder="big", signed=False)
+    return hashlib.sha256(mac_bytes).hexdigest()
 
 
 def _credential_api_urls(api_url: str) -> tuple[str, ...]:

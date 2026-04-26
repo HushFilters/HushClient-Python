@@ -4,17 +4,19 @@ import hashlib
 import io
 import json
 import logging
+import time
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 import requests
 
-from filter_sync.r2_client import R2ClientError
+from filter_sync.r2_client import R2Client, R2ClientError, R2Config
 from filter_sync.sync import (
     SyncError,
     _build_r2_downloader,
     _fetch_r2_config_from_nwebbed,
+    _machine_id_from_mac,
     sync_filters,
 )
 
@@ -62,10 +64,89 @@ class FakeCredentialSession:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
-    def post(self, url: str, json: dict[str, str], timeout: int) -> FakeCredentialResponse:
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, str],
+        timeout: int,
+    ) -> FakeCredentialResponse:
+        self.calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "params": dict(params),
+                "timeout": timeout,
+            }
+        )
         if isinstance(self._response, dict):
             return self._response[url]
+        return self._response
+
+
+class FakeStreamingResponse:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        headers: dict[str, str] | None = None,
+        delay_seconds: float = 0.0,
+        status_code: int = 200,
+        error: Exception | None = None,
+        error_after_chunks: int | None = None,
+    ) -> None:
+        self._chunks = chunks
+        self.headers = headers or {}
+        self.delay_seconds = delay_seconds
+        self.status_code = status_code
+        self.error = error
+        self.error_after_chunks = error_after_chunks
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size: int):
+        del chunk_size
+        chunks_emitted = 0
+        for chunk in self._chunks:
+            if self.delay_seconds:
+                time.sleep(self.delay_seconds)
+            yield chunk
+            chunks_emitted += 1
+            if self.error is not None and self.error_after_chunks == chunks_emitted:
+                raise self.error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeStreamingSession:
+    def __init__(self, response: FakeStreamingResponse | list[FakeStreamingResponse]) -> None:
+        self._response = response
+        self.calls: list[dict[str, object]] = []
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        stream: bool,
+        timeout: int,
+    ) -> FakeStreamingResponse:
+        self.calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "stream": stream,
+                "timeout": timeout,
+            }
+        )
+        if isinstance(self._response, list):
+            assert self._response
+            return self._response.pop(0)
         return self._response
 
 
@@ -205,6 +286,10 @@ def test_sync_filters_downloads_unpacks_and_verifies_filters(
     assert extracted_file_two.read_bytes() == downloaded_filters["01_20260401_20260408.hf"]
     assert (filters_dir / "manifest_current.json").read_text(encoding="utf-8") == manifest_payload
     assert "starting filter md5 verification" in caplog.text
+    assert "extracting filter archive zip=20260401_20260408.zip" in caplog.text
+    assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=2" in caplog.text
+    assert "verifying extracted filters zip=20260401_20260408.zip total_filters=2" in caplog.text
+    assert "finished verifying extracted filters zip=20260401_20260408.zip total_filters=2" in caplog.text
     assert "finished filter md5 verification" in caplog.text
     assert "source=filter" not in caplog.text
 
@@ -325,6 +410,9 @@ def test_sync_filters_logs_filter_verification_failures(
         tmp_path / "filters" / "202604" / "20260401_20260408" / "20260401_20260408.zip"
     ).exists()
     assert "starting filter md5 verification" in caplog.text
+    assert "extracting filter archive zip=20260401_20260408.zip" in caplog.text
+    assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=1" in caplog.text
+    assert "verifying extracted filters zip=20260401_20260408.zip total_filters=1" in caplog.text
     assert "finished filter md5 verification" not in caplog.text
     assert "Filter MD5 verification failed" in caplog.text
 
@@ -420,7 +508,186 @@ def test_sync_filters_skips_download_when_local_filters_match_upload_manifest(
     assert "skipping zip re-download" in caplog.text
 
 
-def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
+def test_sync_filters_logs_local_reuse_verification_progress_every_five_checks(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+
+    filters_dir = tmp_path / "filters"
+    local_dir = filters_dir / "202604" / "20260401_20260408"
+    local_dir.mkdir(parents=True)
+    filter_files = {
+        f"{index:02d}_20260401_20260408.hf": f"filter-{index}".encode("utf-8")
+        for index in range(10)
+    }
+    for filename, content in filter_files.items():
+        (local_dir / filename).write_bytes(content)
+
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(b"zip-bytes-not-needed").hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": f"20260401_20260408/{filename}",
+                    "md5": hashlib.md5(content).hexdigest(),
+                }
+                for filename, content in filter_files.items()
+            ],
+        }
+    )
+    upload_manifest_payload = _make_upload_manifest_payload(
+        "20260401_20260408.zip",
+        hashlib.md5(b"zip-bytes-not-needed").hexdigest(),
+        [
+            {
+                "filename": filename,
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+            for filename, content in filter_files.items()
+        ],
+    )
+    downloader = FakeDownloader(
+        manifest_payload=manifest_payload,
+        objects={},
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": upload_manifest_payload,
+        },
+    )
+
+    result = sync_filters(base_dir=base_dir, downloader=downloader)
+
+    assert result.downloaded == ()
+    assert result.redownloaded == ()
+    assert "local filter verification zip=20260401_20260408.zip 5/10 complete - pass" in caplog.text
+    assert "local filter verification zip=20260401_20260408.zip 10/10 complete - pass" in caplog.text
+
+
+def test_sync_filters_logs_downloaded_filter_verification_progress_every_five_checks(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+
+    filter_files = {
+        f"{index:02d}_20260401_20260408.hf": f"filter-{index}".encode("utf-8")
+        for index in range(10)
+    }
+    zip_bytes = _make_zip_bytes(filter_files)
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(zip_bytes).hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": f"20260401_20260408/{filename}",
+                    "md5": hashlib.md5(content).hexdigest(),
+                }
+                for filename, content in filter_files.items()
+            ],
+        }
+    )
+    upload_manifest_payload = _make_upload_manifest_payload(
+        "20260401_20260408.zip",
+        hashlib.md5(zip_bytes).hexdigest(),
+        [
+            {
+                "filename": filename,
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+            for filename, content in filter_files.items()
+        ],
+    )
+    downloader = FakeDownloader(
+        manifest_payload=manifest_payload,
+        objects={
+            "filters/202604/20260401_20260408/20260401_20260408.zip": zip_bytes,
+        },
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": upload_manifest_payload,
+        },
+    )
+
+    result = sync_filters(base_dir=base_dir, downloader=downloader)
+
+    assert len(result.downloaded) == 1
+    assert "local filter verification zip=20260401_20260408.zip 5/10 complete - pass" in caplog.text
+    assert "local filter verification zip=20260401_20260408.zip 10/10 complete - pass" in caplog.text
+
+
+def test_sync_filters_logs_downloaded_filter_extraction_progress_for_large_archive(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+
+    filter_files = {
+        f"{index:02d}_20260401_20260408.hf": f"filter-{index}".encode("utf-8")
+        for index in range(30)
+    }
+    zip_bytes = _make_zip_bytes(filter_files)
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(zip_bytes).hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": f"20260401_20260408/{filename}",
+                    "md5": hashlib.md5(content).hexdigest(),
+                }
+                for filename, content in filter_files.items()
+            ],
+        }
+    )
+    upload_manifest_payload = _make_upload_manifest_payload(
+        "20260401_20260408.zip",
+        hashlib.md5(zip_bytes).hexdigest(),
+        [
+            {
+                "filename": filename,
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+            for filename, content in filter_files.items()
+        ],
+    )
+    downloader = FakeDownloader(
+        manifest_payload=manifest_payload,
+        objects={
+            "filters/202604/20260401_20260408/20260401_20260408.zip": zip_bytes,
+        },
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": upload_manifest_payload,
+        },
+    )
+
+    result = sync_filters(base_dir=base_dir, downloader=downloader)
+
+    assert len(result.downloaded) == 1
+    assert "extracting filter archive zip=20260401_20260408.zip" in caplog.text
+    assert "local filter extraction zip=20260401_20260408.zip 25/30 members complete" in caplog.text
+    assert "finished extracting filter archive zip=20260401_20260408.zip extracted_members=30" in caplog.text
+
+
+def test_fetch_r2_config_from_nwebbed_uses_get_with_hfkey_header(monkeypatch) -> None:
     response = FakeCredentialResponse(
         {
             "R2_ENDPOINT": "https://example.r2.cloudflarestorage.com/",
@@ -429,6 +696,7 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
         }
     )
     session = FakeCredentialSession(response)
+    monkeypatch.setattr("filter_sync.sync._machine_id_from_mac", lambda: "machine-id-hash")
 
     config = _fetch_r2_config_from_nwebbed(
         {
@@ -442,7 +710,8 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
     assert session.calls == [
         {
             "url": "https://nwebbed.example.com/r2",
-            "json": {"api_key": "test-api-key"},
+            "headers": {"HFKey": "test-api-key"},
+            "params": {"machine_id": "machine-id-hash"},
             "timeout": 60,
         }
     ]
@@ -450,6 +719,59 @@ def test_fetch_r2_config_from_nwebbed_uses_api_key_exchange() -> None:
     assert config.access_key_id == "access-key"
     assert config.secret_access_key == "secret-key"
     assert config.bucket == "hushfilters"
+
+
+def test_fetch_r2_config_from_nwebbed_prefers_bucket_from_response() -> None:
+    response = FakeCredentialResponse(
+        {
+            "R2_ENDPOINT": "https://example.r2.cloudflarestorage.com/",
+            "R2_ACCESS_KEY_ID": "access-key",
+            "R2_SECRET_ACCESS_KEY": "secret-key",
+            "R2_BUCKET": "custom-response-bucket",
+        }
+    )
+    session = FakeCredentialSession(response)
+
+    config = _fetch_r2_config_from_nwebbed(
+        {
+            "NWEBBED_API_KEY": "test-api-key",
+            "NWEBBED_API_URL": "https://nwebbed.example.com/r2",
+        },
+        bucket="hushfilters",
+        session=session,
+    )
+
+    assert config.bucket == "custom-response-bucket"
+
+
+def test_fetch_r2_config_from_nwebbed_omits_machine_id_when_unavailable(monkeypatch) -> None:
+    response = FakeCredentialResponse(
+        {
+            "R2_ENDPOINT": "https://example.r2.cloudflarestorage.com/",
+            "R2_ACCESS_KEY_ID": "access-key",
+            "R2_SECRET_ACCESS_KEY": "secret-key",
+        }
+    )
+    session = FakeCredentialSession(response)
+    monkeypatch.setattr("filter_sync.sync._machine_id_from_mac", lambda: None)
+
+    _fetch_r2_config_from_nwebbed(
+        {
+            "NWEBBED_API_KEY": "test-api-key",
+            "NWEBBED_API_URL": "https://nwebbed.example.com/r2",
+        },
+        bucket="hushfilters",
+        session=session,
+    )
+
+    assert session.calls == [
+        {
+            "url": "https://nwebbed.example.com/r2",
+            "headers": {"HFKey": "test-api-key"},
+            "params": {},
+            "timeout": 60,
+        }
+    ]
 
 
 def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: Path) -> None:
@@ -484,6 +806,176 @@ def test_build_r2_downloader_prefers_direct_r2_settings(monkeypatch, tmp_path: P
     assert downloader._config.bucket == "hushfilters"
 
 
+def test_build_r2_downloader_uses_bucket_from_direct_r2_settings(monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "R2_ENDPOINT=https://example.r2.cloudflarestorage.com/",
+                "R2_ACCESS_KEY_ID=access-key",
+                "R2_SECRET_ACCESS_KEY=secret-key",
+                "R2_BUCKET=custom-env-bucket",
+                "NWEBBED_API_KEY=test-api-key",
+                "NWEBBED_API_URL=https://nwebbed.example.com/r2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def _unexpected_fetch(*args, **kwargs):
+        raise AssertionError("nWebbed credential exchange should not be called")
+
+    monkeypatch.setattr("filter_sync.sync._fetch_r2_config_from_nwebbed", _unexpected_fetch)
+
+    downloader = _build_r2_downloader(
+        env_path=env_path,
+        bucket="hushfilters",
+        project_root=tmp_path,
+    )
+
+    assert downloader._config.bucket == "custom-env-bucket"
+
+
+def test_r2_client_download_file_logs_periodic_progress(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="filter_sync.r2_client")
+    chunks = [b"a" * (1024 * 1024), b"b" * (1024 * 1024)]
+    total_bytes = sum(len(chunk) for chunk in chunks)
+    response = FakeStreamingResponse(
+        chunks,
+        headers={"Content-Length": str(total_bytes)},
+        delay_seconds=0.2,
+    )
+    client = R2Client(
+        R2Config(
+            endpoint="https://example.r2.cloudflarestorage.com",
+            access_key_id="access-key",
+            secret_access_key="secret-key",
+        ),
+        session=FakeStreamingSession(response),
+        progress_log_interval_seconds=0.1,
+    )
+    destination = tmp_path / "archive.zip"
+
+    client.download_file("filters/archive.zip", destination)
+
+    assert destination.stat().st_size == total_bytes
+    assert response.closed is True
+    assert "Starting download object=s3://hushfilters/filters/archive.zip" in caplog.text
+    assert "Download progress object=s3://hushfilters/filters/archive.zip" in caplog.text
+    assert "downloaded=2.0 MiB total=2.0 MiB" in caplog.text
+    assert "Download complete object=s3://hushfilters/filters/archive.zip" in caplog.text
+
+
+def test_r2_client_resumes_partial_download_after_connection_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="filter_sync.r2_client")
+    first_chunk = b"a" * (1024 * 1024)
+    second_chunk = b"b" * (1024 * 1024)
+    total_bytes = len(first_chunk) + len(second_chunk)
+    session = FakeStreamingSession(
+        [
+            FakeStreamingResponse(
+                [first_chunk],
+                headers={"Content-Length": str(total_bytes)},
+                error=requests.ConnectionError("socket closed"),
+                error_after_chunks=1,
+            ),
+            FakeStreamingResponse(
+                [second_chunk],
+                headers={
+                    "Content-Length": str(len(second_chunk)),
+                    "Content-Range": f"bytes {len(first_chunk)}-{total_bytes - 1}/{total_bytes}",
+                },
+                status_code=206,
+            ),
+        ]
+    )
+    client = R2Client(
+        R2Config(
+            endpoint="https://example.r2.cloudflarestorage.com",
+            access_key_id="access-key",
+            secret_access_key="secret-key",
+        ),
+        session=session,
+        progress_log_interval_seconds=0.1,
+        download_max_attempts=3,
+        retry_backoff_base_seconds=0.0,
+    )
+    destination = tmp_path / "archive.zip"
+
+    client.download_file("filters/archive.zip", destination)
+
+    assert destination.read_bytes() == first_chunk + second_chunk
+    assert session.calls[0]["headers"].get("Range") is None
+    assert session.calls[1]["headers"]["Range"] == f"bytes={len(first_chunk)}-"
+    assert "Download interrupted object=s3://hushfilters/filters/archive.zip" in caplog.text
+    assert "Resuming download object=s3://hushfilters/filters/archive.zip" in caplog.text
+
+
+def test_sync_filters_keeps_partial_zip_on_failed_download(tmp_path: Path) -> None:
+    base_dir = tmp_path / "filter_sync"
+    base_dir.mkdir()
+    partial_zip_bytes = b"partial-zip-content"
+    manifest_payload = json.dumps(
+        {
+            "current_filter_zips": [
+                {
+                    "path": "202604/20260401_20260408/20260401_20260408.zip",
+                    "md5": hashlib.md5(b"complete-zip").hexdigest(),
+                }
+            ],
+            "current_filter_files": [
+                {
+                    "path": "20260401_20260408/00_20260401_20260408.hf",
+                    "md5": hashlib.md5(b"payload").hexdigest(),
+                }
+            ],
+        }
+    )
+
+    class InterruptedDownloader(FakeDownloader):
+        def download_file(self, object_key: str, destination: Path) -> None:
+            self.file_requests.append(object_key)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("ab") as handle:
+                handle.write(partial_zip_bytes)
+            raise R2ClientError("temporary network failure")
+
+    downloader = InterruptedDownloader(
+        manifest_payload=manifest_payload,
+        objects={},
+        text_objects={
+            "filters/202604/20260401_20260408/upload_manifest.json": _make_upload_manifest_payload(
+                "20260401_20260408.zip",
+                hashlib.md5(b"complete-zip").hexdigest(),
+                [
+                    {
+                        "filename": "00_20260401_20260408.hf",
+                        "md5": hashlib.md5(b"payload").hexdigest(),
+                    }
+                ],
+            ),
+        },
+    )
+
+    with pytest.raises(R2ClientError, match="temporary network failure"):
+        sync_filters(base_dir=base_dir, downloader=downloader)
+
+    partial_path = (
+        tmp_path
+        / "filters"
+        / "202604"
+        / "20260401_20260408"
+        / ".20260401_20260408.zip.part"
+    )
+    assert partial_path.read_bytes() == partial_zip_bytes
+
+
 def test_fetch_r2_config_from_nwebbed_rejects_incomplete_response() -> None:
     response = FakeCredentialResponse({"endpoint": "https://example.r2.cloudflarestorage.com"})
     session = FakeCredentialSession(response)
@@ -499,7 +991,8 @@ def test_fetch_r2_config_from_nwebbed_rejects_incomplete_response() -> None:
         )
 
 
-def test_fetch_r2_config_from_nwebbed_retries_r2_suffix_for_base_url() -> None:
+def test_fetch_r2_config_from_nwebbed_retries_r2_suffix_for_base_url(monkeypatch) -> None:
+    monkeypatch.setattr("filter_sync.sync._machine_id_from_mac", lambda: None)
     session = FakeCredentialSession(
         {
             "https://nwebbed.example.com": FakeCredentialResponse({}, status_code=404),
@@ -522,8 +1015,34 @@ def test_fetch_r2_config_from_nwebbed_retries_r2_suffix_for_base_url() -> None:
         session=session,
     )
 
-    assert [call["url"] for call in session.calls] == [
-        "https://nwebbed.example.com",
-        "https://nwebbed.example.com/r2",
+    assert session.calls == [
+        {
+            "url": "https://nwebbed.example.com",
+            "headers": {"HFKey": "test-api-key"},
+            "params": {},
+            "timeout": 60,
+        },
+        {
+            "url": "https://nwebbed.example.com/r2",
+            "headers": {"HFKey": "test-api-key"},
+            "params": {},
+            "timeout": 60,
+        },
     ]
     assert config.endpoint == "https://example.r2.cloudflarestorage.com"
+
+
+def test_machine_id_from_mac_hashes_real_mac(monkeypatch) -> None:
+    monkeypatch.setattr("filter_sync.sync.uuid.getnode", lambda: 0x001122334455)
+
+    value = _machine_id_from_mac()
+
+    assert value == hashlib.sha256(bytes.fromhex("001122334455")).hexdigest()
+
+
+def test_machine_id_from_mac_returns_none_for_random_node(monkeypatch) -> None:
+    monkeypatch.setattr("filter_sync.sync.uuid.getnode", lambda: 0x010203040506)
+
+    value = _machine_id_from_mac()
+
+    assert value is None
