@@ -18,6 +18,10 @@ services:
       - ./filters:/app/filters:rw
       - ./manifest.json:/app/manifest.json:rw
       - ./test_manifest.json:/app/test_manifest.json:ro
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
