@@ -72,7 +72,7 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         sync_response = client.get("/ui-sync/")
         assert sync_response.status_code == 200
         assert "sync, update manifest, and reload filters" in sync_response.text
-        assert "/ui-sync/app.js?v=20260419a" in sync_response.text
+        assert "/ui-sync/app.js?v=20260426b" in sync_response.text
         assert "sync filters from nWebbed" in sync_response.text
         assert "update manifest" in sync_response.text
         assert "reload with new filters" in sync_response.text
@@ -256,6 +256,8 @@ def test_sync_status_endpoint_reports_live_logs_during_running_sync(
         assert final_status.status_code == 200
         final_payload = final_status.json()
         assert final_payload["active"] is False
+        assert final_payload["success"] is True
+        assert final_payload["detail"] is None
         assert "INFO download finished" in final_payload["logs"]
 
 
@@ -327,13 +329,20 @@ def test_reload_filters_endpoint_swaps_manager(monkeypatch) -> None:
     assert len(ReloadableFilterManager.created) >= 2
 
 
-def test_sync_apply_endpoint_runs_steps_in_sequence(monkeypatch, tmp_path: Path) -> None:
+def test_sync_apply_endpoint_starts_background_sequence_and_reports_completion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
     api.filter_manager = None
     calls: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
 
     def fake_sync() -> api.SyncFiltersResponse:
         calls.append("sync")
+        started.set()
+        assert release.wait(timeout=2.0)
         return api.SyncFiltersResponse(
             success=True,
             manifest_path=str(tmp_path / "filters" / "manifest_current.json"),
@@ -368,18 +377,42 @@ def test_sync_apply_endpoint_runs_steps_in_sequence(monkeypatch, tmp_path: Path)
 
     with TestClient(api.app) as client:
         response = client.post("/sync/apply")
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["started"] is True
+        assert payload["operation"] == "sync_apply"
+        assert started.wait(timeout=1.0)
 
-    assert response.status_code == 200
+        live_status = client.get("/sync/status")
+        assert live_status.status_code == 200
+        live_payload = live_status.json()
+        assert live_payload["active"] is True
+        assert live_payload["operation"] == "sync_apply"
+
+        release.set()
+
+        deadline = time.time() + 2.0
+        final_status_payload = None
+        while time.time() < deadline:
+            status_response = client.get("/sync/status")
+            assert status_response.status_code == 200
+            candidate = status_response.json()
+            if candidate["operation"] == "sync_apply" and candidate["active"] is False:
+                final_status_payload = candidate
+                break
+            time.sleep(0.05)
+
+    assert final_status_payload is not None
     payload = response.json()
-    assert payload["success"] is True
+    assert payload["started"] is True
     assert payload["test_mode"] is False
     assert calls == ["sync", "manifest", "reload"]
-    assert payload["downloaded"] == [str(tmp_path / "filters" / "202604" / "downloaded.zip")]
-    assert payload["verified_existing"] == [str(tmp_path / "filters" / "202604" / "existing.zip")]
-    assert payload["output_file"] == "manifest.json"
-    assert payload["filter_count"] == 2
-    assert payload["filters"] == ["filters/a.hf", "filters/b.hf"]
-    assert payload["logs"] == [
+    assert final_status_payload["downloaded"] == [str(tmp_path / "filters" / "202604" / "downloaded.zip")]
+    assert final_status_payload["verified_existing"] == [str(tmp_path / "filters" / "202604" / "existing.zip")]
+    assert final_status_payload["output_file"] == "manifest.json"
+    assert final_status_payload["filter_count"] == 2
+    assert final_status_payload["filters"] == ["filters/a.hf", "filters/b.hf"]
+    assert final_status_payload["logs"] == [
         "INFO starting filter sync, manifest update, and reload sequence",
         "INFO step 1/3: filter sync",
         "INFO sync step complete",
@@ -389,9 +422,13 @@ def test_sync_apply_endpoint_runs_steps_in_sequence(monkeypatch, tmp_path: Path)
         "INFO reload step complete",
         "INFO completed filter sync, manifest update, and reload sequence",
     ]
+    assert final_status_payload["active"] is False
+    assert final_status_payload["operation"] == "sync_apply"
+    assert final_status_payload["success"] is True
+    assert final_status_payload["detail"] is None
 
 
-def test_sync_apply_endpoint_stops_after_failed_manifest_step(monkeypatch, tmp_path: Path) -> None:
+def test_sync_apply_endpoint_reports_failed_background_sequence(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
     api.filter_manager = None
     calls: list[str] = []
@@ -433,14 +470,25 @@ def test_sync_apply_endpoint_stops_after_failed_manifest_step(monkeypatch, tmp_p
 
     with TestClient(api.app) as client:
         response = client.post("/sync/apply")
+        assert response.status_code == 202
 
-    assert response.status_code == 500
+        deadline = time.time() + 2.0
+        final_status_payload = None
+        while time.time() < deadline:
+            status_response = client.get("/sync/status")
+            assert status_response.status_code == 200
+            candidate = status_response.json()
+            if candidate["operation"] == "sync_apply" and candidate["active"] is False:
+                final_status_payload = candidate
+                break
+            time.sleep(0.05)
+
+    assert final_status_payload is not None
     payload = response.json()
-    assert payload["success"] is False
+    assert payload["started"] is True
     assert payload["test_mode"] is False
-    assert payload["detail"] == "generate_manifest failed"
     assert calls == ["sync", "manifest"]
-    assert payload["logs"] == [
+    assert final_status_payload["logs"] == [
         "INFO starting filter sync, manifest update, and reload sequence",
         "INFO step 1/3: filter sync",
         "INFO sync step complete",
@@ -448,6 +496,10 @@ def test_sync_apply_endpoint_stops_after_failed_manifest_step(monkeypatch, tmp_p
         "ERROR manifest step failed",
         "ERROR sequence stopped during manifest update",
     ]
+    assert final_status_payload["active"] is False
+    assert final_status_payload["operation"] == "sync_apply"
+    assert final_status_payload["success"] is False
+    assert final_status_payload["detail"] == "generate_manifest failed"
 
 
 def test_current_filter_configuration_uses_hushfilter_test_mode(monkeypatch) -> None:

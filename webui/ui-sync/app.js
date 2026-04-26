@@ -70,17 +70,22 @@ function renderStatusLogs(payload) {
 }
 
 async function pollLiveStatus() {
+  const payload = await fetchSyncStatus();
+  if (payload && (payload.active || (Array.isArray(payload.logs) && payload.logs.length > 0))) {
+    renderStatusLogs(payload);
+  }
+}
+
+async function fetchSyncStatus() {
   try {
     const response = await fetch("/sync/status", { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return;
+      return null;
     }
-    if (payload.active || (Array.isArray(payload.logs) && payload.logs.length > 0)) {
-      renderStatusLogs(payload);
-    }
+    return payload;
   } catch (_err) {
-    // Ignore transient polling failures while the main request is still running.
+    return null;
   }
 }
 
@@ -99,6 +104,38 @@ function stopLiveLogPolling() {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function readResponsePayload(response) {
+  const rawText = await response.text();
+  if (!rawText) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch (_err) {
+    return { detail: "Invalid JSON response" };
+  }
+}
+
+async function waitForOperationCompletion(expectedOperation) {
+  for (;;) {
+    const payload = await fetchSyncStatus();
+    if (payload && payload.operation === expectedOperation) {
+      renderStatusLogs(payload);
+      if (!payload.active) {
+        return payload;
+      }
+    }
+    await sleep(1000);
+  }
+}
+
 async function runOperation({ endpoint, inProgress, success, failure, onSuccess }) {
   setButtonsDisabled(true);
   setStatus(inProgress);
@@ -110,7 +147,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
-    const payload = await response.json().catch(() => ({ detail: "Invalid JSON response" }));
+    const payload = await readResponsePayload(response);
 
     if (!response.ok || payload.success === false) {
       setStatus(`${failure}${response.ok ? "" : ` (${response.status})`}`, "bad");
@@ -121,7 +158,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
 
     setStatus(success, "ok");
     if (typeof onSuccess === "function") {
-      onSuccess(payload);
+      await onSuccess(payload);
     }
     renderOutput(payload);
   } catch (err) {
@@ -133,13 +170,53 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
   }
 }
 
+async function runBackgroundApplyOperation({ endpoint, operation, inProgress, success, failure, onSuccess }) {
+  setButtonsDisabled(true);
+  setStatus(inProgress);
+  document.getElementById("sync-output").textContent = `Starting ${inProgress.toLowerCase()}`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const payload = await readResponsePayload(response);
+
+    if (!response.ok || payload.started !== true || payload.operation !== operation) {
+      setStatus(`${failure}${response.ok ? "" : ` (${response.status})`}`, "bad");
+      renderOutput(payload);
+      return;
+    }
+
+    const finalPayload = await waitForOperationCompletion(operation);
+    if (finalPayload.success !== true) {
+      setStatus(failure, "bad");
+      setMetric("downloaded-count", finalPayload.downloaded?.length || 0);
+      renderOutput(finalPayload);
+      return;
+    }
+
+    setStatus(success, "ok");
+    if (typeof onSuccess === "function") {
+      await onSuccess(finalPayload);
+    }
+    renderOutput(finalPayload);
+  } catch (err) {
+    setStatus("Client error", "bad");
+    renderOutput({ detail: err instanceof Error ? err.message : String(err) });
+  } finally {
+    setButtonsDisabled(false);
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   refreshLoadedCount();
 
   document.getElementById("apply-button").addEventListener("click", () => {
     setMetric("downloaded-count", 0);
-    runOperation({
+    runBackgroundApplyOperation({
       endpoint: "/sync/apply",
+      operation: "sync_apply",
       inProgress: "Running filter sync, manifest update, and reload...",
       success: "Filter sync, manifest update, and reload complete",
       failure: "Combined filter update failed",

@@ -41,16 +41,40 @@ class _SyncOperationLogState:
         self._active = False
         self._operation: str | None = None
         self._logs: list[str] = []
+        self._success: bool | None = None
+        self._detail: str | None = None
+        self._result: dict[str, object] = {}
 
     def start(self, operation: str) -> None:
         with self._lock:
             self._active = True
             self._operation = operation
             self._logs = []
+            self._success = None
+            self._detail = None
+            self._result = {}
 
     def append(self, line: str) -> None:
         with self._lock:
             self._logs.append(line)
+
+    def set_result(self, payload: dict[str, object]) -> None:
+        with self._lock:
+            success = payload.get("success")
+            self._success = success if isinstance(success, bool) else None
+
+            detail = payload.get("detail")
+            self._detail = detail if isinstance(detail, str) or detail is None else str(detail)
+
+            logs = payload.get("logs")
+            if isinstance(logs, list):
+                self._logs = [str(line) for line in logs if str(line).strip()]
+
+            self._result = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"success", "detail", "logs", "test_mode"}
+            }
 
     def finish(self) -> None:
         with self._lock:
@@ -62,6 +86,9 @@ class _SyncOperationLogState:
                 "active": self._active,
                 "operation": self._operation,
                 "logs": list(self._logs),
+                "success": self._success,
+                "detail": self._detail,
+                **self._result,
             }
 
 
@@ -271,11 +298,28 @@ class SyncApplyResponse(ApiResponse):
     detail: Optional[str] = None
 
 
+class SyncApplyStartResponse(ApiResponse):
+    """Response model for starting the background sync/apply sequence."""
+    started: bool
+    operation: str
+    detail: Optional[str] = None
+
+
 class SyncStatusResponse(ApiResponse):
     """Response model for live sync status polling."""
     active: bool
     operation: Optional[str] = None
     logs: List[str] = Field(default_factory=list)
+    success: Optional[bool] = None
+    detail: Optional[str] = None
+    manifest_path: Optional[str] = None
+    output_file: Optional[str] = None
+    downloaded: List[str] = Field(default_factory=list)
+    redownloaded: List[str] = Field(default_factory=list)
+    verified_existing: List[str] = Field(default_factory=list)
+    filter_count: int = 0
+    filters: List[str] = Field(default_factory=list)
+    max_nk: int = 0
 
 
 # API Endpoints
@@ -484,6 +528,7 @@ async def sync_filters_endpoint():
     try:
         sync_operation_logs.start("sync_filters")
         response = await run_in_threadpool(_run_filter_sync_with_logs)
+        sync_operation_logs.set_result(_response_payload(response))
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
@@ -492,23 +537,32 @@ async def sync_filters_endpoint():
         operation_lock.release()
 
 
-@app.post("/sync/apply", response_model=SyncApplyResponse, tags=["Sync"])
+@app.post("/sync/apply", response_model=SyncApplyStartResponse, status_code=202, tags=["Sync"])
 async def sync_apply_endpoint():
     """
-    Run filter sync, manifest update, and filter reload in sequence.
+    Start filter sync, manifest update, and filter reload in a background thread.
     """
     if not operation_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
 
+    sync_operation_logs.start("sync_apply")
     try:
-        sync_operation_logs.start("sync_apply")
-        response = await run_in_threadpool(_run_sync_apply_with_logs)
-        if response.success:
-            return response
-        return JSONResponse(status_code=500, content=response.model_dump())
-    finally:
+        worker = threading.Thread(
+            target=_run_sync_apply_background_job,
+            name="sync-apply-worker",
+            daemon=True,
+        )
+        worker.start()
+    except Exception:
         sync_operation_logs.finish()
         operation_lock.release()
+        raise
+
+    return SyncApplyStartResponse(
+        started=True,
+        operation="sync_apply",
+        detail="Background sync/apply started",
+    )
 
 
 @app.post("/sync/manifest", response_model=ManifestUpdateResponse, tags=["Sync"])
@@ -522,6 +576,7 @@ async def update_manifest_endpoint():
     try:
         sync_operation_logs.start("sync_manifest")
         response = await run_in_threadpool(_run_manifest_update_with_logs)
+        sync_operation_logs.set_result(_response_payload(response))
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
@@ -541,6 +596,7 @@ async def reload_filters_endpoint():
     try:
         sync_operation_logs.start("sync_reload")
         response = await run_in_threadpool(_run_filter_reload_with_logs)
+        sync_operation_logs.set_result(_response_payload(response))
         if response.success:
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
@@ -747,6 +803,23 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
     )
 
 
+def _run_sync_apply_background_job() -> None:
+    try:
+        response = _run_sync_apply_with_logs()
+        sync_operation_logs.set_result(_response_payload(response))
+    except Exception as exc:
+        sync_operation_logs.set_result(
+            {
+                "success": False,
+                "detail": f"Unexpected sync/apply error: {exc}",
+                "logs": sync_operation_logs.snapshot().get("logs", []),
+            }
+        )
+    finally:
+        sync_operation_logs.finish()
+        operation_lock.release()
+
+
 def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
     global filter_manager
 
@@ -836,6 +909,7 @@ def _run_scheduled_auto_update() -> None:
         sync_operation_logs.start("auto_sync_apply")
         logger.info("Starting scheduled filter sync, manifest update, and reload sequence")
         response = _run_sync_apply_with_logs()
+        sync_operation_logs.set_result(_response_payload(response))
         if response.success:
             logger.info("Scheduled filter sync, manifest update, and reload completed successfully")
             return
@@ -866,6 +940,10 @@ def _split_log_lines(raw_logs: str) -> List[str]:
 
 def _append_live_sync_log(line: str) -> None:
     sync_operation_logs.append(line)
+
+
+def _response_payload(response: ApiResponse) -> dict[str, object]:
+    return response.model_dump(exclude={"test_mode"})
 
 
 if __name__ == "__main__":
