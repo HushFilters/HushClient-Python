@@ -10,7 +10,6 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
-from urllib.parse import urlsplit, urlunsplit
 from zipfile import ZipFile
 
 import requests
@@ -688,31 +687,35 @@ def _fetch_r2_config_from_nwebbed(
         raise R2ClientError("NWEBBED_API_KEY and NWEBBED_API_URL must not be empty")
 
     active_session = session or requests.Session()
-    candidate_urls = _credential_api_urls(api_url)
     machine_id = _machine_id_from_mac()
-    last_error: requests.RequestException | None = None
-    response = None
-    for candidate_url in candidate_urls:
-        try:
-            params: dict[str, str] = {}
-            if machine_id is not None:
-                params["machine_id"] = machine_id
+    params: dict[str, str] = {}
+    if machine_id is not None:
+        params["machine_id"] = machine_id
+    headers = {"Authorization": f"HFKey {api_key}"}
 
+    try:
+        response = active_session.get(
+            api_url,
+            headers=headers,
+            params=params,
+            timeout=60,
+        )
+        if response.status_code == 400 and machine_id is not None:
+            logger.warning(
+                "Credential endpoint rejected machine_id query param for url=%s; retrying without machine_id",
+                api_url,
+            )
             response = active_session.get(
-                candidate_url,
-                headers={"HFKey": api_key},
-                params=params,
+                api_url,
+                headers=headers,
+                params={},
                 timeout=60,
             )
-            response.raise_for_status()
-            break
-        except requests.RequestException as exc:
-            last_error = exc
-    if response is None:
-        assert last_error is not None
+        response.raise_for_status()
+    except requests.RequestException as exc:
         raise R2ClientError(
-            f"Failed to fetch R2 credentials from nWebbed: {last_error}"
-        ) from last_error
+            f"Failed to fetch R2 credentials from nWebbed: {exc}"
+        ) from exc
 
     try:
         payload = response.json()
@@ -747,33 +750,7 @@ def _machine_id_from_mac() -> str | None:
     if (mac_address >> 40) & 0x01:
         return None
 
-    mac_bytes = mac_address.to_bytes(6, byteorder="big", signed=False)
-    return hashlib.sha256(mac_bytes).hexdigest()
-
-
-def _credential_api_urls(api_url: str) -> tuple[str, ...]:
-    normalized = api_url.strip().rstrip("/")
-    parsed = urlsplit(normalized)
-    if not parsed.scheme or not parsed.netloc:
-        return (normalized,)
-
-    if parsed.path.endswith("/r2") or parsed.path == "/r2":
-        return (normalized,)
-
-    if parsed.path in {"", "/"}:
-        r2_url = urlunsplit((parsed.scheme, parsed.netloc, "/r2", parsed.query, parsed.fragment))
-        return (normalized, r2_url)
-
-    r2_url = urlunsplit(
-        (
-            parsed.scheme,
-            parsed.netloc,
-            f"{parsed.path.rstrip('/')}/r2",
-            parsed.query,
-            parsed.fragment,
-        )
-    )
-    return (normalized, r2_url)
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{mac_address:012x}"))
 
 
 def _extract_payload_value(

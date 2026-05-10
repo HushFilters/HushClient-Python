@@ -1,0 +1,61 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug API (uvicorn, no reload)",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "module": "uvicorn",
+      "args": [
+        "api:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "windows": {
+        "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+      },
+      "linux": {
+        "python": "${workspaceFolder}/.venv/bin/python"
+      },
+      "osx": {
+        "python": "${workspaceFolder}/.venv/bin/python"
+      }
+    },
+    {
+      "name": "Debug API (uvicorn, reload)",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "module": "uvicorn",
+      "args": [
+        "api:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "windows": {
+        "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+      },
+      "linux": {
+        "python": "${workspaceFolder}/.venv/bin/python"
+      },
+      "osx": {
+        "python": "${workspaceFolder}/.venv/bin/python"
+      }
+    }
+  ]
+}
