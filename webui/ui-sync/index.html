@@ -4,62 +4,105 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260417c">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260601a">
 </head>
 <body>
-  <main class="shell">
-    <section class="panel">
+  <main class="workspace-shell">
+    <section class="workspace-panel">
       {{TEST_MODE_BANNER}}
-      <nav class="topbar">
-        <a class="nav-link" href="/ui-check/">Credential Check</a>
-        <a class="nav-link active" href="/ui-sync/">Filter Sync</a>
-      </nav>
 
-      <header class="hero">
-        <p class="eyebrow">nWebbed Delivery</p>
-        <h1>Filter Synchronization</h1>
-        <p class="sub">Fetch the latest manifest from nWebbed, download any missing or stale filter archives, verify their checksums, unpack them into the repository <code>filters</code> tree, and show the resulting logs here.</p>
+      <header class="workspace-header">
+        <div class="workspace-brand">
+          <img
+            class="workspace-brand__logo"
+            src="/ui-assets/images/nWebbed_PrimaryTransparent.svg"
+            alt="nWebbed"
+          >
+          <div class="workspace-brand__copy">
+            <p class="workspace-brand__eyebrow">HushFilter Operations</p>
+            <p class="workspace-brand__caption">nWebbed delivery workflow for sync, manifest rotation, and live filter reloads.</p>
+          </div>
+        </div>
+
+        <nav class="workspace-nav" aria-label="Tool navigation">
+          <a class="workspace-nav-link" href="/ui-check/">Credential Check</a>
+          <a class="workspace-nav-link active" href="/ui-sync/">Filter Sync</a>
+        </nav>
       </header>
 
-      <section class="action-card primary-action-card">
-        <div class="action-copy">
-          <h2>Apply Latest Filters</h2>
-          <p>Run filter sync, update <code>manifest.json</code>, and reload the application with the new filters in one sequential operation.</p>
-        </div>
-        <button id="apply-button" class="sync-button full-width" type="button">sync, update manifest, and reload filters</button>
-      </section>
+      <div class="workspace-body">
+        <div class="workspace-grid workspace-grid--sync">
+          <section class="surface-card surface-card--accent sync-hero">
+            <div class="surface-card__inner sync-hero__inner">
+              <p class="section-eyebrow">Delivery Pipeline</p>
+              <h1 class="section-title">Filter Synchronization</h1>
+              <p class="section-copy">
+                Fetch the latest manifest from nWebbed, download any missing or stale filter archives,
+                verify their checksums, unpack them into the repository <code>filters</code> tree,
+                and show the resulting logs here.
+              </p>
 
-      <section class="action-card">
-        <div class="action-copy">
-          <h2>Manual Steps</h2>
-          <p>Run the filter sync workflow one step at a time when you want to inspect or repeat a specific stage.</p>
-        </div>
-        <div class="button-grid">
-          <button id="sync-button" class="sync-button" type="button">sync filters from nWebbed</button>
-          <button id="manifest-button" class="sync-button secondary" type="button">update manifest</button>
-          <button id="reload-button" class="sync-button tertiary" type="button">reload with new filters</button>
-        </div>
-        <p id="sync-status" class="status">Idle</p>
-      </section>
+              <ul class="detail-list">
+                <li>
+                  <strong>One-click full apply</strong>
+                  <span>Trigger sync, manifest update, and in-memory reload in one background sequence.</span>
+                </li>
+                <li>
+                  <strong>Manual stage control</strong>
+                  <span>Run and inspect each step separately when you need to diagnose a specific handoff.</span>
+                </li>
+                <li>
+                  <strong>Live operational feedback</strong>
+                  <span>Status and output surfaces stay in view while the server streams progress.</span>
+                </li>
+              </ul>
+            </div>
+          </section>
 
-      <section class="summary-grid">
-        <article class="summary-card">
-          <h2>Downloaded</h2>
-          <p id="downloaded-count" class="metric">0</p>
-        </article>
-        <article class="summary-card">
-          <h2>Loaded Filters</h2>
-          <p id="loaded-count" class="metric">0</p>
-        </article>
-      </section>
+          <section class="surface-card sync-actions-panel">
+            <div class="surface-card__inner sync-actions-panel__inner">
+              <section class="sync-action-block sync-action-block--primary">
+                <p class="section-eyebrow">Primary Action</p>
+                <h2 class="sync-section-heading">Apply Latest Filters</h2>
+                <p class="section-copy">Run filter sync, update <code>manifest.json</code>, and reload the application with the new filters in one sequential operation.</p>
+                <button id="apply-button" class="action-button" type="button">sync, update manifest, and reload filters</button>
+              </section>
 
-      <section class="result-block">
-        <h2>Sync Output</h2>
-        <pre id="sync-output" class="mono">-</pre>
-      </section>
+              <section class="sync-action-block">
+                <p class="section-eyebrow">Manual Steps</p>
+                <h2 class="sync-section-heading">Manual Steps</h2>
+                <p class="section-copy">Run the filter sync workflow one step at a time when you want to inspect or repeat a specific stage.</p>
+                <div class="sync-actions-grid">
+                  <button id="sync-button" class="action-button action-button--secondary" type="button">sync filters from nWebbed</button>
+                  <button id="manifest-button" class="action-button action-button--amber" type="button">update manifest</button>
+                  <button id="reload-button" class="action-button action-button--cyan" type="button">reload with new filters</button>
+                </div>
+                <p id="sync-status" class="status">Idle</p>
+              </section>
+            </div>
+          </section>
+        </div>
+
+        <section class="metrics-grid sync-metrics-grid">
+          <article class="surface-card metric-card">
+            <p class="metric-label">Downloaded</p>
+            <p id="downloaded-count" class="metric-value">0</p>
+          </article>
+          <article class="surface-card metric-card">
+            <p class="metric-label">Loaded Filters</p>
+            <p id="loaded-count" class="metric-value">0</p>
+          </article>
+        </section>
+
+        <section class="surface-card sync-output-card">
+          <div class="surface-card__inner">
+            <p class="section-eyebrow">Operational Log</p>
+            <h2 class="sync-section-heading">Sync Output</h2>
+            <pre id="sync-output" class="mono-surface">-</pre>
+          </div>
+        </section>
+      </div>
     </section>
   </main>
 

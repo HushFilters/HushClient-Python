@@ -4,88 +4,152 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Check UI</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/ui-check/styles.css">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
+  <link rel="stylesheet" href="/ui-check/styles.css?v=20260601a">
 </head>
 <body>
-  <main class="shell">
-    <section class="panel">
+  <main class="workspace-shell">
+    <section class="workspace-panel">
       {{TEST_MODE_BANNER}}
-      <nav class="topbar">
-        <a class="nav-link active" href="/ui-check/">Credential Check</a>
-        <a class="nav-link" href="/ui-sync/">Filter Sync</a>
-      </nav>
 
-      <header class="panel-header">
-        <p class="eyebrow">HushFilter</p>
-        <h1>Breached Credential Check</h1>
-        <p class="sub">Enter username and password. The SHA-256 digest is computed in your browser and sent to <code>/checkhash</code>. The raw credential is not transmitted and does not leave your device.</p>
-      </header>
-
-      <form id="check-form" class="form" autocomplete="off">
-        <label for="username">Username</label>
-        <input id="username" name="username" type="text" required placeholder="user@example.com" value="testusername1@nwebbed.com">
-
-        <label for="password">Password</label>
-        <div class="password-field">
-          <input
-            id="password"
-            name="password"
-            type="password"
-            placeholder="Optional"
-            autocomplete="current-password"
-            value="testpassword1"
+      <header class="workspace-header">
+        <div class="workspace-brand">
+          <img
+            class="workspace-brand__logo"
+            src="/ui-assets/images/nWebbed_PrimaryTransparent.svg"
+            alt="nWebbed"
           >
-          <button
-            id="password-toggle"
-            class="password-toggle"
-            type="button"
-            aria-label="Show password"
-            aria-controls="password"
-            aria-pressed="false"
-            data-visible="false"
-          >
-            <span class="sr-only">Toggle password visibility</span>
-            <svg
-              class="password-icon password-icon-show"
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-              aria-hidden="true"
-            >
-              <path d="M2.25 12s3.75-6.75 9.75-6.75S21.75 12 21.75 12 18 18.75 12 18.75 2.25 12 2.25 12Z" />
-              <circle cx="12" cy="12" r="3.25" />
-            </svg>
-            <svg
-              class="password-icon password-icon-hide"
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-              aria-hidden="true"
-            >
-              <path d="M3 3l18 18" />
-              <path d="M10.6 6.35A10.8 10.8 0 0 1 12 6.25c6 0 9.75 5.75 9.75 5.75a17.6 17.6 0 0 1-4.08 4.62" />
-              <path d="M14.82 14.94A3.75 3.75 0 0 1 9.06 9.18" />
-              <path d="M6.4 6.4A17.95 17.95 0 0 0 2.25 12S6 17.75 12 17.75c1.52 0 2.88-.37 4.08-.95" />
-            </svg>
-          </button>
+          <div class="workspace-brand__copy">
+            <p class="workspace-brand__eyebrow">HushFilter Operations</p>
+            <p class="workspace-brand__caption">Credential verification with nWebbed visual system and client-side hashing.</p>
+          </div>
         </div>
 
-        <button id="submit-btn" type="submit">Submit</button>
-      </form>
+        <nav class="workspace-nav" aria-label="Tool navigation">
+          <a class="workspace-nav-link active" href="/ui-check/">Credential Check</a>
+          <a class="workspace-nav-link" href="/ui-sync/">Filter Sync</a>
+        </nav>
+      </header>
 
-      <section class="result-block">
-        <h2>Computed SHA-256</h2>
-        <pre id="hash-output" class="mono">-</pre>
-      </section>
+      <div class="workspace-body">
+        <div class="workspace-grid workspace-grid--check">
+          <section class="surface-card surface-card--accent check-hero">
+            <div class="surface-card__inner check-hero__inner">
+              <p class="section-eyebrow">Exposure Probe</p>
+              <h1 class="section-title">Breached Credential Check</h1>
+              <p class="section-copy">
+                Enter username and password. The SHA-256 digest is computed in your browser and sent to
+                <code>/checkhash</code>. The raw credential is not transmitted and does not leave your device.
+              </p>
 
-      <section class="result-block">
-        <h2>API Result</h2>
-        <p id="status" class="status">Idle</p>
-        <pre id="api-output" class="mono">-</pre>
-      </section>
+              <ul class="detail-list">
+                <li>
+                  <strong>Client-side hashing</strong>
+                  <span>The browser derives the digest locally before any request is made.</span>
+                </li>
+                <li>
+                  <strong>nWebbed delimiter</strong>
+                  <span>The input is hashed as <code>username + "nWebbed" + password</code> to match filter probes.</span>
+                </li>
+                <li>
+                  <strong>Immediate response surface</strong>
+                  <span>Computed hash and API payload stay visible below for quick validation and troubleshooting.</span>
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="surface-card check-form-card">
+            <div class="surface-card__inner">
+              <p class="section-eyebrow">Query Form</p>
+              <form id="check-form" class="form-shell" autocomplete="off">
+                <div class="field-stack">
+                  <label class="field-label" for="username">Username</label>
+                  <input
+                    id="username"
+                    class="app-input"
+                    name="username"
+                    type="text"
+                    required
+                    placeholder="user@example.com"
+                    value="testusername1@nwebbed.com"
+                  >
+                </div>
+
+                <div class="field-stack">
+                  <label class="field-label" for="password">Password</label>
+                  <div class="password-field">
+                    <input
+                      id="password"
+                      class="app-input"
+                      name="password"
+                      type="password"
+                      placeholder="Optional"
+                      autocomplete="current-password"
+                      value="testpassword1"
+                    >
+                    <button
+                      id="password-toggle"
+                      class="password-toggle"
+                      type="button"
+                      aria-label="Show password"
+                      aria-controls="password"
+                      aria-pressed="false"
+                      data-visible="false"
+                    >
+                      <span class="sr-only">Toggle password visibility</span>
+                      <svg
+                        class="password-icon password-icon-show"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        aria-hidden="true"
+                      >
+                        <path d="M2.25 12s3.75-6.75 9.75-6.75S21.75 12 21.75 12 18 18.75 12 18.75 2.25 12 2.25 12Z" />
+                        <circle cx="12" cy="12" r="3.25" />
+                      </svg>
+                      <svg
+                        class="password-icon password-icon-hide"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 3l18 18" />
+                        <path d="M10.6 6.35A10.8 10.8 0 0 1 12 6.25c6 0 9.75 5.75 9.75 5.75a17.6 17.6 0 0 1-4.08 4.62" />
+                        <path d="M14.82 14.94A3.75 3.75 0 0 1 9.06 9.18" />
+                        <path d="M6.4 6.4A17.95 17.95 0 0 0 2.25 12S6 17.75 12 17.75c1.52 0 2.88-.37 4.08-.95" />
+                      </svg>
+                    </button>
+                  </div>
+                  <p class="field-help">Leave blank if you only want to probe a username-derived hash path.</p>
+                </div>
+
+                <button id="submit-btn" class="action-button" type="submit">Submit</button>
+              </form>
+            </div>
+          </section>
+        </div>
+
+        <div class="workspace-grid check-results-grid">
+          <section class="surface-card">
+            <div class="surface-card__inner">
+              <p class="section-eyebrow">Digest</p>
+              <h2 class="check-section-heading">Computed SHA-256</h2>
+              <pre id="hash-output" class="mono-surface">-</pre>
+            </div>
+          </section>
+
+          <section class="surface-card">
+            <div class="surface-card__inner">
+              <p class="section-eyebrow">Lookup Result</p>
+              <h2 class="check-section-heading">API Result</h2>
+              <p id="status" class="status">Idle</p>
+              <pre id="api-output" class="mono-surface">-</pre>
+            </div>
+          </section>
+        </div>
+      </div>
     </section>
   </main>
 
