@@ -374,6 +374,7 @@ async def ui_sync_page():
 # Static UI
 app.mount("/ui-check", StaticFiles(directory="webui/ui-check", html=True), name="ui-check")
 app.mount("/ui-sync", StaticFiles(directory="webui/ui-sync", html=True), name="ui-sync")
+app.mount("/ui-assets", StaticFiles(directory="webui/assets"), name="ui-assets")
 
 
 @app.get("/health", tags=["General"])
