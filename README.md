@@ -27,21 +27,21 @@ docker compose build
 
 docker compose up
 
-Navigate to http://localhost:8000/ui-sync/
+Navigate to https://localhost/ui-sync/
 
 Click on "sync, update manifest, and reload filters"
 
 Wait... You will have large files to download at first. (50+ GB)
 
-When finished, navigate to http://localhost:8000/ui-check/
+When finished, navigate to https://localhost/ui-check/
 
 The prepopulated value should return TRUE when submitted
 
 You can check raw username + password combinations like so:
 
-GET http://localhost:8000/check?username=testusername1@nwebbed.com&password=testpassword1
+GET https://localhost/check?username=testusername1@nwebbed.com&password=testpassword1
 
-POST http://localhost:8000/check
+POST https://localhost/check
 
 {
   "username": "testusername1@nwebbed.com",
@@ -52,7 +52,7 @@ Internally, raw usernames and passwords are hashed: SHA256(username+nWebbed+pass
 
 Instead of sending raw credentials, you can hash beforehand and check the hash directly:
 
-POST http://localhost:8000/checkhash
+POST https://localhost/checkhash
 
 {
     "hash": "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
@@ -99,23 +99,58 @@ uv run hush.py --test --checkhash <sha256_hex_digest>
 # Start API
 uv run uvicorn api:app --reload
 
-# Start API Container
+# Start API Container with nginx public TLS and internal nginx-to-API mTLS
 docker compose build
 docker compose up -d
 
 # Credential check
-curl "http://localhost:8000/check?username=test123&password=password123"
+curl -k "https://localhost/check?username=test123&password=password123"
 
 # Open credential check UI
-# http://localhost:8000/ui-check
+# https://localhost/ui-check
 
 # Open filter sync UI
-# http://localhost:8000/ui-sync
+# https://localhost/ui-sync
 
 Postman collection is saved under test/HushClient.postman_collection.json
 
-Swagger docs are available at http://localhost:8000/docs
+Swagger docs are available at https://localhost/docs
 ```
+
+### Docker TLS and Internal mTLS
+
+`docker compose up` starts three services:
+
+- `tls-cert-init` creates default self-signed certificates under `./tls` when no certificates are present.
+- `hushfilter-api` runs Uvicorn on private Docker port `8443` with TLS enabled and requires a client certificate.
+- `nginx` publishes ports `80` and `443`, redirects HTTP to HTTPS, and connects to `hushfilter-api` with an internal client certificate.
+
+The generated/default certificate layout is:
+
+```text
+tls/
+  public/
+    fullchain.pem          # public/customer-facing nginx certificate
+    privkey.pem            # public/customer-facing nginx private key
+  internal/
+    ca.crt                 # internal CA trusted by nginx and Uvicorn
+    ca.key                 # internal CA private key for generated defaults
+    hushfilter-api.crt     # Uvicorn server certificate
+    hushfilter-api.key     # Uvicorn server private key
+    nginx-client.crt       # nginx client certificate for mTLS
+    nginx-client.key       # nginx client private key for mTLS
+```
+
+To use a customer-facing certificate, replace:
+
+```text
+tls/public/fullchain.pem
+tls/public/privkey.pem
+```
+
+To use your own internal mTLS material, replace the complete `tls/internal/` set. The API server certificate must be valid for DNS name `hushfilter-api`, because nginx verifies that name when proxying to the app. The nginx client certificate should include client authentication usage and be signed by the CA in `tls/internal/ca.crt`.
+
+The bootstrap script does not overwrite existing certs. If you want to regenerate defaults, stop the stack and remove `./tls`, then run `docker compose up` again. The generated certs are for bootstrapping and local deployments; compliance-sensitive deployments should replace them with certificates issued and rotated by your internal PKI.
 
 ## CLI Usage
 

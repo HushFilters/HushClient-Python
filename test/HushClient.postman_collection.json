@@ -12,12 +12,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/",
-          "protocol": "http",
+          "raw": "https://localhost/",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             ""
           ]
@@ -31,12 +30,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/ui-check",
-          "protocol": "http",
+          "raw": "https://localhost/ui-check",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "ui-check"
           ]
@@ -50,12 +48,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/ui-sync",
-          "protocol": "http",
+          "raw": "https://localhost/ui-sync",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "ui-sync"
           ]
@@ -69,12 +66,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/docs",
-          "protocol": "http",
+          "raw": "https://localhost/docs",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "docs"
           ]
@@ -88,12 +84,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/health",
-          "protocol": "http",
+          "raw": "https://localhost/health",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "health"
           ]
@@ -107,12 +102,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/stats",
-          "protocol": "http",
+          "raw": "https://localhost/stats",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "stats"
           ]
@@ -126,12 +120,11 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "http://localhost:8000/check?username=testusername1@nwebbed.com&password=testpassword1",
-          "protocol": "http",
+          "raw": "https://localhost/check?username=testusername1@nwebbed.com&password=testpassword1",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "check"
           ],
@@ -164,12 +157,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/check",
-          "protocol": "http",
+          "raw": "https://localhost/check",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "check"
           ]
@@ -198,12 +190,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/check/batch",
-          "protocol": "http",
+          "raw": "https://localhost/check/batch",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "check",
             "batch"
@@ -233,12 +224,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/checkhash",
-          "protocol": "http",
+          "raw": "https://localhost/checkhash",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "checkhash"
           ]
@@ -267,12 +257,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/checkhash/batch",
-          "protocol": "http",
+          "raw": "https://localhost/checkhash/batch",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "checkhash",
             "batch"
@@ -302,12 +291,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/sync/filters",
-          "protocol": "http",
+          "raw": "https://localhost/sync/filters",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "sync",
             "filters"
@@ -337,12 +325,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/sync/manifest",
-          "protocol": "http",
+          "raw": "https://localhost/sync/manifest",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "sync",
             "manifest"
@@ -372,12 +359,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/sync/reload",
-          "protocol": "http",
+          "raw": "https://localhost/sync/reload",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "sync",
             "reload"
@@ -407,12 +393,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/sync/apply",
-          "protocol": "http",
+          "raw": "https://localhost/sync/apply",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "sync",
             "apply"
@@ -445,12 +430,11 @@
           }
         },
         "url": {
-          "raw": "http://localhost:8000/sync/status",
-          "protocol": "http",
+          "raw": "https://localhost/sync/status",
+          "protocol": "https",
           "host": [
             "localhost"
           ],
-          "port": "8000",
           "path": [
             "sync",
             "status"
