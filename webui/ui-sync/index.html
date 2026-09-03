@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
   <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260601a">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260903b">
 </head>
 <body>
   <main class="workspace-shell">
@@ -84,6 +84,65 @@
           </section>
         </div>
 
+        <section class="surface-card auto-update-card">
+          <div class="surface-card__inner auto-update-card__inner">
+            <div class="auto-update-heading">
+              <div>
+                <p class="section-eyebrow">Automation</p>
+                <h2 class="sync-section-heading">Daily Auto-Update</h2>
+                <p class="section-copy">Control the server-side schedule and review recent automatic update attempts.</p>
+              </div>
+              <span id="auto-update-badge" class="schedule-badge">Loading</span>
+            </div>
+
+            <form id="auto-update-form" class="auto-update-form">
+              <label class="toggle-field" for="auto-update-enabled">
+                <input id="auto-update-enabled" type="checkbox">
+                <span class="toggle-control" aria-hidden="true"></span>
+                <span>
+                  <strong>Enable daily updates</strong>
+                  <small>The schedule takes effect immediately and survives container restarts.</small>
+                </span>
+              </label>
+
+              <label class="field-stack" for="auto-update-hour">
+                <span class="field-label">Container-local start hour</span>
+                <input id="auto-update-hour" class="app-input schedule-hour-input" type="number" min="0" max="23" step="1" required>
+                <span class="field-help">Use 24-hour time. For example, 2 means 02:00 and 14 means 14:00.</span>
+              </label>
+
+              <div class="schedule-actions">
+                <button id="auto-update-save" class="action-button" type="submit">Save schedule</button>
+                <button id="auto-update-refresh" class="action-button action-button--secondary" type="button">Refresh</button>
+              </div>
+              <p id="auto-update-message" class="status" aria-live="polite"></p>
+            </form>
+
+            <dl class="schedule-facts">
+              <div>
+                <dt>Next update</dt>
+                <dd id="auto-update-next">—</dd>
+              </div>
+              <div>
+                <dt>Container timezone</dt>
+                <dd id="auto-update-timezone">—</dd>
+              </div>
+              <div>
+                <dt>Container time</dt>
+                <dd id="auto-update-current-time">—</dd>
+              </div>
+            </dl>
+
+            <div class="auto-update-history-heading">
+              <h3>Recent automatic updates</h3>
+              <span>Latest 20 attempts</span>
+            </div>
+            <div id="auto-update-history" class="auto-update-history">
+              <p class="empty-history">Loading update history…</p>
+            </div>
+          </div>
+        </section>
+
         <section class="metrics-grid sync-metrics-grid">
           <article class="surface-card metric-card">
             <p class="metric-label">Downloaded</p>
@@ -106,6 +165,6 @@
     </section>
   </main>
 
-  <script src="/ui-sync/app.js?v=20260426b" defer></script>
+  <script src="/ui-sync/app.js?v=20260903a" defer></script>
 </body>
 </html>

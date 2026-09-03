@@ -61,11 +61,15 @@ POST https://localhost/checkhash
 
 To run the application in TEST MODE with bundled test filters, set HUSHFILTER_TEST_MODE=1 in your .env file.
 
-To enable the built-in daily auto updater, set AUTO_UPDATE_FILTERS=1 and choose the local 24-hour run hour with AUTO_UPDATE_TIME.
+To enable the built-in daily auto updater, set AUTO_UPDATE_FILTERS=1 and choose the container-local 24-hour run hour with AUTO_UPDATE_TIME.
 Examples:
 - `AUTO_UPDATE_TIME=23` runs the full sync/apply workflow at 11pm each day
 - `AUTO_UPDATE_TIME=2` runs the full sync/apply workflow at 2am each day
 - `AUTO_UPDATE_FILTERS=0` disables scheduled auto updates
+
+The Filter Sync UI at `/ui-sync/` can also enable or disable automatic updates and change the run hour without restarting the service. The UI shows the container timezone, current container time, next scheduled update, live progress, and the latest 20 automatic update attempts with their downloaded/refreshed files and logs.
+
+UI changes are persisted to `filters/.auto_update_state.json`, which takes precedence over the environment defaults on later starts. The existing `filters:/app/filters` Docker volume preserves this state when the API container is recreated. Delete that state file to return to the `AUTO_UPDATE_FILTERS` and `AUTO_UPDATE_TIME` defaults.
 
 These username+password combinations should always return TRUE in both test and production modes:
 

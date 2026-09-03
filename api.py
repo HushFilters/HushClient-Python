@@ -32,7 +32,17 @@ from helpers.generate_manifest import generate_manifest
 # Global filter manager
 filter_manager: Optional[FilterManager] = None
 operation_lock = threading.Lock()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
+AUTO_UPDATE_HISTORY_LIMIT = 20
+AUTO_UPDATE_LOG_LINES_LIMIT = 500
+AUTO_UPDATE_STATE_PATH = "filters/.auto_update_state.json"
+
+_auto_update_state_lock = threading.Lock()
+_auto_update_enabled = False
+_auto_update_hour: int | None = None
+_auto_update_history: list[dict[str, object]] = []
+_auto_update_active_since: str | None = None
+_auto_update_wake_event: asyncio.Event | None = None
 
 
 class _SyncOperationLogState:
@@ -128,6 +138,7 @@ def _render_ui_page(page_name: str) -> HTMLResponse:
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the application."""
     global filter_manager
+    global _auto_update_wake_event
     auto_update_task: asyncio.Task[None] | None = None
     
     # Startup: Load filters
@@ -142,16 +153,9 @@ async def lifespan(app: FastAPI):
         print(f"Error loading filters: {e}")
         raise
 
-    if _is_auto_update_enabled():
-        auto_update_hour = _configured_auto_update_hour()
-        if auto_update_hour is None:
-            logger.warning(
-                "AUTO_UPDATE_FILTERS=1 but AUTO_UPDATE_TIME=%r is invalid; auto updater is disabled",
-                os.getenv("AUTO_UPDATE_TIME"),
-            )
-        else:
-            logger.info("Starting daily auto-update scheduler for hour %02d:00", auto_update_hour)
-            auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
+    _load_auto_update_state()
+    _auto_update_wake_event = asyncio.Event()
+    auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
 
     yield
 
@@ -159,6 +163,7 @@ async def lifespan(app: FastAPI):
         auto_update_task.cancel()
         with suppress(asyncio.CancelledError):
             await auto_update_task
+    _auto_update_wake_event = None
 
     # Shutdown: Close filters
     if filter_manager:
@@ -322,6 +327,37 @@ class SyncStatusResponse(ApiResponse):
     max_nk: int = 0
 
 
+class AutoUpdateConfigRequest(BaseModel):
+    """Runtime configuration for the daily automatic update."""
+    enabled: bool
+    hour: Optional[int] = Field(default=None, ge=0, le=23)
+
+
+class AutoUpdateRun(BaseModel):
+    """Summary and logs for one scheduled update attempt."""
+    triggered_at: str
+    completed_at: str
+    status: str
+    detail: Optional[str] = None
+    downloaded: List[str] = Field(default_factory=list)
+    redownloaded: List[str] = Field(default_factory=list)
+    verified_existing: List[str] = Field(default_factory=list)
+    logs: List[str] = Field(default_factory=list)
+
+
+class AutoUpdateStatusResponse(ApiResponse):
+    """Current scheduler configuration and recent automatic runs."""
+    enabled: bool
+    hour: Optional[int] = None
+    timezone: str
+    current_time: str
+    next_update_at: Optional[str] = None
+    active: bool = False
+    active_since: Optional[str] = None
+    live_logs: List[str] = Field(default_factory=list)
+    history: List[AutoUpdateRun] = Field(default_factory=list)
+
+
 # API Endpoints
 @app.get("/", tags=["General"])
 async def root():
@@ -341,6 +377,7 @@ async def root():
             "sync_filters": "/sync/filters",
             "sync_apply": "/sync/apply",
             "sync_status": "/sync/status",
+            "auto_update": "/sync/auto-update",
             "update_manifest": "/sync/manifest",
             "reload_filters": "/sync/reload",
         }
@@ -612,6 +649,30 @@ async def sync_status_endpoint():
     return SyncStatusResponse(**sync_operation_logs.snapshot())
 
 
+@app.get("/sync/auto-update", response_model=AutoUpdateStatusResponse, tags=["Sync"])
+async def auto_update_status_endpoint():
+    """Return scheduler settings, its next run, and recent scheduled update history."""
+    return AutoUpdateStatusResponse(**_auto_update_status_snapshot())
+
+
+@app.put("/sync/auto-update", response_model=AutoUpdateStatusResponse, tags=["Sync"])
+async def update_auto_update_config_endpoint(request: AutoUpdateConfigRequest):
+    """Enable, disable, or reschedule automatic updates without restarting the API."""
+    if request.enabled and request.hour is None:
+        raise HTTPException(status_code=422, detail="hour is required when automatic updates are enabled")
+
+    try:
+        _set_auto_update_config(request.enabled, request.hour)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save auto-update configuration: {exc}") from exc
+
+    wake_event = _auto_update_wake_event
+    if wake_event is not None:
+        wake_event.set()
+
+    return AutoUpdateStatusResponse(**_auto_update_status_snapshot())
+
+
 def _run_filter_sync_with_logs() -> SyncFiltersResponse:
     log_stream = StringIO()
     formatter = logging.Formatter("%(levelname)s %(message)s")
@@ -878,6 +939,149 @@ def _configured_auto_update_hour() -> int | None:
     return hour
 
 
+def _auto_update_state_path() -> Path:
+    return Path(os.getenv("AUTO_UPDATE_STATE_PATH", AUTO_UPDATE_STATE_PATH))
+
+
+def _load_auto_update_state() -> None:
+    global _auto_update_enabled, _auto_update_hour, _auto_update_history, _auto_update_active_since
+
+    enabled = _is_auto_update_enabled()
+    hour = _configured_auto_update_hour()
+    if enabled and hour is None:
+        logger.warning(
+            "AUTO_UPDATE_FILTERS=1 but AUTO_UPDATE_TIME=%r is invalid; auto updater is disabled",
+            os.getenv("AUTO_UPDATE_TIME"),
+        )
+        enabled = False
+    history: list[dict[str, object]] = []
+
+    state_path = _auto_update_state_path()
+    try:
+        raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raw_state = None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not load auto-update state from %s: %s", state_path, exc)
+        raw_state = None
+
+    if isinstance(raw_state, dict):
+        stored_enabled = raw_state.get("enabled")
+        stored_hour = raw_state.get("hour")
+        if isinstance(stored_enabled, bool):
+            enabled = stored_enabled
+        if isinstance(stored_hour, int) and not isinstance(stored_hour, bool) and 0 <= stored_hour <= 23:
+            hour = stored_hour
+        elif stored_hour is None:
+            hour = None
+        if enabled and hour is None:
+            enabled = False
+
+        stored_history = raw_state.get("history")
+        if isinstance(stored_history, list):
+            history = [
+                entry
+                for entry in stored_history
+                if isinstance(entry, dict)
+                and isinstance(entry.get("triggered_at"), str)
+                and isinstance(entry.get("completed_at"), str)
+                and entry.get("status") in {"success", "failed", "skipped"}
+            ][:AUTO_UPDATE_HISTORY_LIMIT]
+
+    with _auto_update_state_lock:
+        _auto_update_enabled = enabled
+        _auto_update_hour = hour
+        _auto_update_history = history
+        _auto_update_active_since = None
+
+
+def _persist_auto_update_state_locked() -> None:
+    state_path = _auto_update_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = state_path.with_name(f".{state_path.name}.tmp")
+    payload = {
+        "version": 1,
+        "enabled": _auto_update_enabled,
+        "hour": _auto_update_hour,
+        "history": _auto_update_history,
+    }
+    temporary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(state_path)
+
+
+def _set_auto_update_config(enabled: bool, hour: int | None) -> None:
+    global _auto_update_enabled, _auto_update_hour
+
+    with _auto_update_state_lock:
+        previous_enabled = _auto_update_enabled
+        previous_hour = _auto_update_hour
+        _auto_update_enabled = enabled
+        _auto_update_hour = hour
+        try:
+            _persist_auto_update_state_locked()
+        except OSError:
+            _auto_update_enabled = previous_enabled
+            _auto_update_hour = previous_hour
+            raise
+
+
+def _auto_update_config() -> tuple[bool, int | None]:
+    with _auto_update_state_lock:
+        return _auto_update_enabled, _auto_update_hour
+
+
+def _append_auto_update_history(entry: dict[str, object]) -> None:
+    global _auto_update_history
+
+    with _auto_update_state_lock:
+        _auto_update_history = [entry, *_auto_update_history][:AUTO_UPDATE_HISTORY_LIMIT]
+        try:
+            _persist_auto_update_state_locked()
+        except OSError as exc:
+            logger.error("Could not persist auto-update history: %s", exc)
+
+
+def _local_timezone_label(now: datetime) -> str:
+    name = now.tzname() or "local"
+    offset = now.utcoffset()
+    if offset is None:
+        return name
+
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    return f"{name} (UTC{sign}{hours:02d}:{minutes:02d})"
+
+
+def _auto_update_status_snapshot() -> dict[str, object]:
+    enabled, hour = _auto_update_config()
+    now = datetime.now().astimezone()
+    next_update_at: str | None = None
+    if enabled and hour is not None:
+        next_update = now + timedelta(seconds=_seconds_until_next_auto_update(now, hour))
+        next_update_at = next_update.isoformat(timespec="seconds")
+
+    sync_status = sync_operation_logs.snapshot()
+    with _auto_update_state_lock:
+        history = [dict(entry) for entry in _auto_update_history]
+        active_since = _auto_update_active_since
+
+    active = bool(sync_status["active"] and sync_status["operation"] == "auto_sync_apply")
+    live_logs = list(sync_status["logs"]) if active else []
+
+    return {
+        "enabled": enabled,
+        "hour": hour,
+        "timezone": _local_timezone_label(now),
+        "current_time": now.isoformat(timespec="seconds"),
+        "next_update_at": next_update_at,
+        "active": active,
+        "active_since": active_since if active else None,
+        "live_logs": live_logs,
+        "history": history,
+    }
+
+
 def _seconds_until_next_auto_update(now: datetime, update_hour: int) -> float:
     next_run = now.replace(hour=update_hour, minute=0, second=0, microsecond=0)
     if next_run <= now:
@@ -887,26 +1091,56 @@ def _seconds_until_next_auto_update(now: datetime, update_hour: int) -> float:
 
 async def _auto_update_scheduler_loop() -> None:
     while True:
-        update_hour = _configured_auto_update_hour()
-        if update_hour is None:
-            logger.warning("Stopping auto-update scheduler because AUTO_UPDATE_TIME is invalid")
+        enabled, update_hour = _auto_update_config()
+        wake_event = _auto_update_wake_event
+        if wake_event is None:
             return
+
+        if not enabled or update_hour is None:
+            logger.info("Automatic filter updates are disabled")
+            await wake_event.wait()
+            wake_event.clear()
+            continue
 
         now = datetime.now().astimezone()
         sleep_seconds = _seconds_until_next_auto_update(now, update_hour)
         next_run = now + timedelta(seconds=sleep_seconds)
         logger.info("Next auto update scheduled for %s", next_run.isoformat(timespec="seconds"))
 
-        await asyncio.sleep(sleep_seconds)
+        try:
+            await asyncio.wait_for(wake_event.wait(), timeout=sleep_seconds)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            wake_event.clear()
+            continue
+
         await asyncio.to_thread(_run_scheduled_auto_update)
 
 
 def _run_scheduled_auto_update() -> None:
+    global _auto_update_active_since
+
+    triggered_at = datetime.now().astimezone()
     if not operation_lock.acquire(blocking=False):
         logger.info("Skipping scheduled auto update because another filter operation is already in progress")
+        completed_at = datetime.now().astimezone()
+        _append_auto_update_history({
+            "triggered_at": triggered_at.isoformat(timespec="seconds"),
+            "completed_at": completed_at.isoformat(timespec="seconds"),
+            "status": "skipped",
+            "detail": "Another filter operation was already in progress",
+            "downloaded": [],
+            "redownloaded": [],
+            "verified_existing": [],
+            "logs": ["INFO scheduled update skipped because another filter operation was in progress"],
+        })
         return
 
+    response: SyncApplyResponse | None = None
     try:
+        with _auto_update_state_lock:
+            _auto_update_active_since = triggered_at.isoformat(timespec="seconds")
         sync_operation_logs.start("auto_sync_apply")
         logger.info("Starting scheduled filter sync, manifest update, and reload sequence")
         response = _run_sync_apply_with_logs()
@@ -919,9 +1153,31 @@ def _run_scheduled_auto_update() -> None:
             "Scheduled filter sync, manifest update, and reload failed: %s",
             response.detail or "unknown error",
         )
+    except Exception as exc:
+        logger.exception("Scheduled filter sync, manifest update, and reload raised an exception")
+        response = SyncApplyResponse(
+            success=False,
+            logs=list(sync_operation_logs.snapshot().get("logs", [])),
+            detail=f"Unexpected scheduled update error: {exc}",
+        )
+        sync_operation_logs.set_result(_response_payload(response))
     finally:
         sync_operation_logs.finish()
         operation_lock.release()
+        completed_at = datetime.now().astimezone()
+        with _auto_update_state_lock:
+            _auto_update_active_since = None
+        if response is not None:
+            _append_auto_update_history({
+                "triggered_at": triggered_at.isoformat(timespec="seconds"),
+                "completed_at": completed_at.isoformat(timespec="seconds"),
+                "status": "success" if response.success else "failed",
+                "detail": response.detail,
+                "downloaded": list(response.downloaded),
+                "redownloaded": list(response.redownloaded),
+                "verified_existing": list(response.verified_existing),
+                "logs": list(response.logs[-AUTO_UPDATE_LOG_LINES_LIMIT:]),
+            })
 
 
 def _merge_output_logs(

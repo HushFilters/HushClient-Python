@@ -59,6 +59,7 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         assert root_response.json()["endpoints"]["sync_filters"] == "/sync/filters"
         assert root_response.json()["endpoints"]["sync_apply"] == "/sync/apply"
         assert root_response.json()["endpoints"]["sync_status"] == "/sync/status"
+        assert root_response.json()["endpoints"]["auto_update"] == "/sync/auto-update"
         assert root_response.json()["endpoints"]["update_manifest"] == "/sync/manifest"
         assert root_response.json()["endpoints"]["reload_filters"] == "/sync/reload"
         assert "ui" not in root_response.json()["endpoints"]
@@ -72,7 +73,9 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         sync_response = client.get("/ui-sync/")
         assert sync_response.status_code == 200
         assert "sync, update manifest, and reload filters" in sync_response.text
-        assert "/ui-sync/app.js?v=20260426b" in sync_response.text
+        assert "/ui-sync/app.js?v=20260903a" in sync_response.text
+        assert "Daily Auto-Update" in sync_response.text
+        assert "Recent automatic updates" in sync_response.text
         assert "sync filters from nWebbed" in sync_response.text
         assert "update manifest" in sync_response.text
         assert "reload with new filters" in sync_response.text
@@ -511,6 +514,16 @@ def test_current_filter_configuration_uses_hushfilter_test_mode(monkeypatch) -> 
     manifest_path = api._current_filter_configuration()
     assert manifest_path == "manifest.json"
 
+    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "1")
+
+    manifest_path = api._current_filter_configuration()
+    assert manifest_path == "test_manifest.json"
+
+    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "true")
+
+    manifest_path = api._current_filter_configuration()
+    assert manifest_path == "manifest.json"
+
 
 def test_auto_update_enabled_only_when_env_is_one(monkeypatch) -> None:
     monkeypatch.delenv("AUTO_UPDATE_FILTERS", raising=False)
@@ -555,7 +568,7 @@ def test_seconds_until_next_auto_update_rolls_to_next_day_after_hour() -> None:
     assert api._seconds_until_next_auto_update(now, 23) == 84600
 
 
-def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch) -> None:
+def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
     def fake_sync_apply() -> api.SyncApplyResponse:
@@ -563,6 +576,8 @@ def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch) -> None:
         return api.SyncApplyResponse(success=True, logs=["INFO sequence complete"])
 
     monkeypatch.setattr(api, "_run_sync_apply_with_logs", fake_sync_apply)
+    monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update.json"))
+    api._load_auto_update_state()
     api.sync_operation_logs.finish()
 
     api._run_scheduled_auto_update()
@@ -571,9 +586,16 @@ def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch) -> None:
     status = api.sync_operation_logs.snapshot()
     assert status["active"] is False
     assert status["operation"] == "auto_sync_apply"
+    history = api._auto_update_status_snapshot()["history"]
+    assert len(history) == 1
+    assert history[0]["status"] == "success"
+    assert history[0]["logs"] == ["INFO sequence complete"]
+
+    persisted = json.loads((tmp_path / "auto-update.json").read_text(encoding="utf-8"))
+    assert persisted["history"][0]["status"] == "success"
 
 
-def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch) -> None:
+def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
     def fake_sync_apply() -> api.SyncApplyResponse:
@@ -581,6 +603,8 @@ def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch)
         return api.SyncApplyResponse(success=True)
 
     monkeypatch.setattr(api, "_run_sync_apply_with_logs", fake_sync_apply)
+    monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update.json"))
+    api._load_auto_update_state()
 
     assert api.operation_lock.acquire(blocking=False)
     try:
@@ -589,13 +613,63 @@ def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch)
         api.operation_lock.release()
 
     assert calls == []
+    history = api._auto_update_status_snapshot()["history"]
+    assert history[0]["status"] == "skipped"
 
-    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "1")
 
-    manifest_path = api._current_filter_configuration()
-    assert manifest_path == "test_manifest.json"
+def test_auto_update_api_manages_and_persists_schedule(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "auto-update.json"
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(state_path))
+    monkeypatch.setenv("AUTO_UPDATE_FILTERS", "1")
+    monkeypatch.setenv("AUTO_UPDATE_TIME", "2")
+    api.filter_manager = None
 
-    monkeypatch.setenv("HUSHFILTER_TEST_MODE", "true")
+    with TestClient(api.app) as client:
+        initial_response = client.get("/sync/auto-update")
+        assert initial_response.status_code == 200
+        initial = initial_response.json()
+        assert initial["enabled"] is True
+        assert initial["hour"] == 2
+        assert initial["next_update_at"] is not None
+        assert initial["timezone"]
 
-    manifest_path = api._current_filter_configuration()
-    assert manifest_path == "manifest.json"
+        update_response = client.put(
+            "/sync/auto-update",
+            json={"enabled": True, "hour": 14},
+        )
+        assert update_response.status_code == 200
+        updated = update_response.json()
+        assert updated["enabled"] is True
+        assert updated["hour"] == 14
+        assert updated["next_update_at"] is not None
+
+        disable_response = client.put(
+            "/sync/auto-update",
+            json={"enabled": False, "hour": 14},
+        )
+        assert disable_response.status_code == 200
+        disabled = disable_response.json()
+        assert disabled["enabled"] is False
+        assert disabled["next_update_at"] is None
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["enabled"] is False
+    assert persisted["hour"] == 14
+
+
+def test_auto_update_api_requires_hour_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
+    monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update.json"))
+    monkeypatch.delenv("AUTO_UPDATE_FILTERS", raising=False)
+    monkeypatch.delenv("AUTO_UPDATE_TIME", raising=False)
+    api.filter_manager = None
+
+    with TestClient(api.app) as client:
+        response = client.put(
+            "/sync/auto-update",
+            json={"enabled": True, "hour": None},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "hour is required when automatic updates are enabled"
