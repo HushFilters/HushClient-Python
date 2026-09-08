@@ -67,7 +67,7 @@ Examples:
 - `AUTO_UPDATE_TIME=2` runs the full sync/apply workflow at 2am each day
 - `AUTO_UPDATE_FILTERS=0` disables scheduled auto updates
 
-The Filter Sync UI at `/ui-sync/` can also enable or disable automatic updates and change the run hour without restarting the service. The UI shows the container timezone, current container time, next scheduled update, live progress, and the latest 20 automatic update attempts with their downloaded/refreshed files and logs.
+The Filter Sync UI at `/ui-sync/` can also enable or disable automatic updates and change the run hour without restarting the service. The UI shows the container timezone, current container time, next scheduled update, live progress in the operational log, and summary outcomes for the latest 20 manual or automatic syncs.
 
 UI changes are persisted to `filters/.auto_update_state.json`, which takes precedence over the environment defaults on later starts. The existing `filters:/app/filters` Docker volume preserves this state when the API container is recreated. Delete that state file to return to the `AUTO_UPDATE_FILTERS` and `AUTO_UPDATE_TIME` defaults.
 

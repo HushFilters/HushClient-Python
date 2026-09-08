@@ -45,6 +45,11 @@ class DummyFilterManager:
         return [self.check_sha256_hash(hash_value) for hash_value in hash_values]
 
 
+@pytest.fixture(autouse=True)
+def isolate_auto_update_state(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update-state.json"))
+
+
 def test_root_and_ui_endpoints(monkeypatch) -> None:
     monkeypatch.setattr(api, "FilterManager", DummyFilterManager)
     api.filter_manager = None
@@ -73,9 +78,9 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         sync_response = client.get("/ui-sync/")
         assert sync_response.status_code == 200
         assert "sync, update manifest, and reload filters" in sync_response.text
-        assert "/ui-sync/app.js?v=20260903a" in sync_response.text
+        assert "/ui-sync/app.js?v=20260903b" in sync_response.text
         assert "Daily Auto-Update" in sync_response.text
-        assert "Recent automatic updates" in sync_response.text
+        assert "Recent sync history" in sync_response.text
         assert "sync filters from nWebbed" in sync_response.text
         assert "update manifest" in sync_response.text
         assert "reload with new filters" in sync_response.text
@@ -152,6 +157,10 @@ def test_sync_filters_endpoint_returns_logs(monkeypatch, tmp_path: Path) -> None
         "INFO local filter verification zip=20260401_20260408.zip 5/10 complete - pass",
         "INFO finished filter md5 verification",
     ]
+    history = api._auto_update_status_snapshot()["history"]
+    assert history[0]["trigger"] == "manual"
+    assert history[0]["operation"] == "sync_filters"
+    assert history[0]["status"] == "success"
 
 
 def test_sync_filters_endpoint_mirrors_logs_to_stdout(
@@ -429,6 +438,11 @@ def test_sync_apply_endpoint_starts_background_sequence_and_reports_completion(
     assert final_status_payload["operation"] == "sync_apply"
     assert final_status_payload["success"] is True
     assert final_status_payload["detail"] is None
+    history = api._auto_update_status_snapshot()["history"]
+    assert history[0]["trigger"] == "manual"
+    assert history[0]["operation"] == "sync_apply"
+    assert history[0]["status"] == "success"
+    assert history[0]["filter_count"] == 2
 
 
 def test_sync_apply_endpoint_reports_failed_background_sequence(monkeypatch, tmp_path: Path) -> None:
@@ -589,7 +603,8 @@ def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch, tmp_path: Pa
     history = api._auto_update_status_snapshot()["history"]
     assert len(history) == 1
     assert history[0]["status"] == "success"
-    assert history[0]["logs"] == ["INFO sequence complete"]
+    assert history[0]["trigger"] == "scheduled"
+    assert history[0]["operation"] == "sync_apply"
 
     persisted = json.loads((tmp_path / "auto-update.json").read_text(encoding="utf-8"))
     assert persisted["history"][0]["status"] == "success"

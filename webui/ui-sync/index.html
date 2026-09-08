@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
   <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260903b">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260903c">
 </head>
 <body>
   <main class="workspace-shell">
@@ -90,7 +90,7 @@
               <div>
                 <p class="section-eyebrow">Automation</p>
                 <h2 class="sync-section-heading">Daily Auto-Update</h2>
-                <p class="section-copy">Control the server-side schedule and review recent automatic update attempts.</p>
+                <p class="section-copy">Control the server-side schedule and review recent manual and automatic sync outcomes.</p>
               </div>
               <span id="auto-update-badge" class="schedule-badge">Loading</span>
             </div>
@@ -134,11 +134,11 @@
             </dl>
 
             <div class="auto-update-history-heading">
-              <h3>Recent automatic updates</h3>
-              <span>Latest 20 attempts</span>
+              <h3>Recent sync history</h3>
+              <span>Latest 20 syncs</span>
             </div>
             <div id="auto-update-history" class="auto-update-history">
-              <p class="empty-history">Loading update history…</p>
+              <p class="empty-history">Loading sync history…</p>
             </div>
           </div>
         </section>
@@ -165,6 +165,6 @@
     </section>
   </main>
 
-  <script src="/ui-sync/app.js?v=20260903a" defer></script>
+  <script src="/ui-sync/app.js?v=20260903b" defer></script>
 </body>
 </html>

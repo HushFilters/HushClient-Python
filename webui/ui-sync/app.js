@@ -84,23 +84,54 @@ function formatDuration(startValue, endValue) {
   return `${minutes}m ${seconds % 60}s`;
 }
 
-function appendHistoryList(parent, label, values) {
-  if (!Array.isArray(values) || values.length === 0) {
-    return;
+function formatHistoryTime(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return formatScheduledTime(value);
+  }
+  return parsed.toLocaleString();
+}
+
+function historyDescription(run) {
+  const trigger = run.trigger === "manual" ? "manual" : "scheduled";
+  const subject = trigger === "manual"
+    ? (run.operation === "sync_filters" ? "Filter sync manually" : "Sync manually")
+    : "Scheduled sync automatically";
+  const when = formatHistoryTime(run.triggered_at);
+
+  if (run.status === "running") {
+    return `${subject} started on ${when} — in progress currently`;
   }
 
-  const heading = document.createElement("strong");
-  heading.textContent = `${label} (${values.length})`;
-  parent.appendChild(heading);
+  const outcome = run.status === "success"
+    ? "completed successfully"
+    : (run.status === "skipped" ? "was skipped" : "failed");
+  return `${subject} performed on ${when} — ${outcome}`;
+}
 
-  const list = document.createElement("ul");
-  list.className = "history-file-list";
-  values.forEach((value) => {
-    const item = document.createElement("li");
-    item.textContent = value;
-    list.appendChild(item);
-  });
-  parent.appendChild(list);
+function historyOutcome(run) {
+  if (run.status === "running") {
+    return `Running for ${formatDuration(run.triggered_at, run.completed_at)}. Live output is shown in Operational Log below.`;
+  }
+
+  const outcomes = [];
+  if (run.filter_count > 0) {
+    outcomes.push(`${run.filter_count} filters loaded`);
+  }
+  if ((run.downloaded?.length || 0) > 0) {
+    outcomes.push(`${run.downloaded.length} new archive${run.downloaded.length === 1 ? "" : "s"} downloaded`);
+  }
+  if ((run.redownloaded?.length || 0) > 0) {
+    outcomes.push(`${run.redownloaded.length} archive${run.redownloaded.length === 1 ? "" : "s"} refreshed`);
+  }
+  if ((run.verified_existing?.length || 0) > 0) {
+    outcomes.push(`${run.verified_existing.length} archive${run.verified_existing.length === 1 ? "" : "s"} already current`);
+  }
+  if (outcomes.length === 0 && run.status === "success") {
+    outcomes.push("No archive downloads were required");
+  }
+  outcomes.push(`duration ${formatDuration(run.triggered_at, run.completed_at)}`);
+  return outcomes.join(" · ");
 }
 
 function renderAutoUpdateHistory(history, activeRun = null) {
@@ -115,7 +146,7 @@ function renderAutoUpdateHistory(history, activeRun = null) {
   if (runs.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty-history";
-    empty.textContent = "No automatic update attempts have been recorded yet.";
+    empty.textContent = "No manual or automatic syncs have been recorded yet.";
     container.appendChild(empty);
     return;
   }
@@ -126,14 +157,8 @@ function renderAutoUpdateHistory(history, activeRun = null) {
 
     const header = document.createElement("div");
     header.className = "history-item__header";
-    const title = document.createElement("div");
-    const triggered = document.createElement("strong");
-    triggered.textContent = formatScheduledTime(run.triggered_at);
-    const timing = document.createElement("span");
-    timing.textContent = run.status === "running"
-      ? `In progress · ${formatDuration(run.triggered_at, run.completed_at)}`
-      : `Completed ${formatScheduledTime(run.completed_at)} · ${formatDuration(run.triggered_at, run.completed_at)}`;
-    title.append(triggered, timing);
+    const title = document.createElement("strong");
+    title.textContent = historyDescription(run);
 
     const badge = document.createElement("span");
     badge.className = `run-badge run-badge--${run.status || "failed"}`;
@@ -143,7 +168,7 @@ function renderAutoUpdateHistory(history, activeRun = null) {
 
     const counts = document.createElement("p");
     counts.className = "history-item__counts";
-    counts.textContent = `${run.downloaded?.length || 0} downloaded · ${run.redownloaded?.length || 0} refreshed · ${run.verified_existing?.length || 0} already current`;
+    counts.textContent = historyOutcome(run);
     item.appendChild(counts);
 
     if (run.detail) {
@@ -153,29 +178,12 @@ function renderAutoUpdateHistory(history, activeRun = null) {
       item.appendChild(detail);
     }
 
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = `View files and logs (${run.logs?.length || 0} lines)`;
-    details.appendChild(summary);
-
-    const detailBody = document.createElement("div");
-    detailBody.className = "history-item__body";
-    appendHistoryList(detailBody, "Downloaded", run.downloaded);
-    appendHistoryList(detailBody, "Re-downloaded", run.redownloaded);
-    appendHistoryList(detailBody, "Verified existing", run.verified_existing);
-    if (Array.isArray(run.logs) && run.logs.length > 0) {
-      const logs = document.createElement("pre");
-      logs.className = "mono-surface history-logs";
-      logs.textContent = run.logs.join("\n");
-      detailBody.appendChild(logs);
-    }
-    details.appendChild(detailBody);
-    item.appendChild(details);
     container.appendChild(item);
   });
 }
 
 let autoUpdateFormDirty = false;
+let autoUpdateWasActive = false;
 
 function setAutoUpdateMessage(message, variant = "") {
   const element = document.getElementById("auto-update-message");
@@ -207,12 +215,34 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
     triggered_at: payload.active_since,
     completed_at: payload.current_time,
     status: "running",
+    trigger: "scheduled",
+    operation: "sync_apply",
+    filter_count: 0,
     downloaded: [],
     redownloaded: [],
     verified_existing: [],
-    logs: payload.live_logs || [],
   } : null;
   renderAutoUpdateHistory(payload.history, activeRun);
+
+  if (payload.active) {
+    renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
+    setStatus("Scheduled filter update running…");
+    autoUpdateWasActive = true;
+  } else if (autoUpdateWasActive) {
+    const completedRun = Array.isArray(payload.history)
+      ? payload.history.find((run) => run.trigger !== "manual")
+      : null;
+    if (completedRun) {
+      renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
+      setStatus(
+        completedRun.status === "success" ? "Scheduled filter update complete" : "Scheduled filter update failed",
+        completedRun.status === "success" ? "ok" : "bad",
+      );
+      setMetric("downloaded-count", (completedRun.downloaded?.length || 0) + (completedRun.redownloaded?.length || 0));
+      void refreshLoadedCount();
+    }
+    autoUpdateWasActive = false;
+  }
 }
 
 async function refreshAutoUpdateStatus() {

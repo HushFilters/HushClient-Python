@@ -34,7 +34,6 @@ filter_manager: Optional[FilterManager] = None
 operation_lock = threading.Lock()
 logger = logging.getLogger("uvicorn.error")
 AUTO_UPDATE_HISTORY_LIMIT = 20
-AUTO_UPDATE_LOG_LINES_LIMIT = 500
 AUTO_UPDATE_STATE_PATH = "filters/.auto_update_state.json"
 
 _auto_update_state_lock = threading.Lock()
@@ -334,19 +333,21 @@ class AutoUpdateConfigRequest(BaseModel):
 
 
 class AutoUpdateRun(BaseModel):
-    """Summary and logs for one scheduled update attempt."""
+    """Summary for one manual or scheduled sync attempt."""
     triggered_at: str
     completed_at: str
     status: str
+    trigger: str = "scheduled"
+    operation: str = "sync_apply"
+    filter_count: int = 0
     detail: Optional[str] = None
     downloaded: List[str] = Field(default_factory=list)
     redownloaded: List[str] = Field(default_factory=list)
     verified_existing: List[str] = Field(default_factory=list)
-    logs: List[str] = Field(default_factory=list)
 
 
 class AutoUpdateStatusResponse(ApiResponse):
-    """Current scheduler configuration and recent automatic runs."""
+    """Current scheduler configuration, live status, and recent sync runs."""
     enabled: bool
     hour: Optional[int] = None
     timezone: str
@@ -563,6 +564,8 @@ async def sync_filters_endpoint():
     if not operation_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
 
+    triggered_at = datetime.now().astimezone()
+    response: SyncFiltersResponse | None = None
     try:
         sync_operation_logs.start("sync_filters")
         response = await run_in_threadpool(_run_filter_sync_with_logs)
@@ -571,6 +574,8 @@ async def sync_filters_endpoint():
             return response
         return JSONResponse(status_code=500, content=response.model_dump())
     finally:
+        if response is not None:
+            _record_sync_history("manual", "sync_filters", triggered_at, response)
         sync_operation_logs.finish()
         operation_lock.release()
 
@@ -651,7 +656,7 @@ async def sync_status_endpoint():
 
 @app.get("/sync/auto-update", response_model=AutoUpdateStatusResponse, tags=["Sync"])
 async def auto_update_status_endpoint():
-    """Return scheduler settings, its next run, and recent scheduled update history."""
+    """Return scheduler settings, its next run, and recent manual/automatic sync history."""
     return AutoUpdateStatusResponse(**_auto_update_status_snapshot())
 
 
@@ -866,18 +871,21 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
 
 
 def _run_sync_apply_background_job() -> None:
+    triggered_at = datetime.now().astimezone()
+    response: SyncApplyResponse | None = None
     try:
         response = _run_sync_apply_with_logs()
         sync_operation_logs.set_result(_response_payload(response))
     except Exception as exc:
-        sync_operation_logs.set_result(
-            {
-                "success": False,
-                "detail": f"Unexpected sync/apply error: {exc}",
-                "logs": sync_operation_logs.snapshot().get("logs", []),
-            }
+        response = SyncApplyResponse(
+            success=False,
+            detail=f"Unexpected sync/apply error: {exc}",
+            logs=list(sync_operation_logs.snapshot().get("logs", [])),
         )
+        sync_operation_logs.set_result(_response_payload(response))
     finally:
+        if response is not None:
+            _record_sync_history("manual", "sync_apply", triggered_at, response)
         sync_operation_logs.finish()
         operation_lock.release()
 
@@ -979,20 +987,39 @@ def _load_auto_update_state() -> None:
 
         stored_history = raw_state.get("history")
         if isinstance(stored_history, list):
-            history = [
-                entry
-                for entry in stored_history
-                if isinstance(entry, dict)
-                and isinstance(entry.get("triggered_at"), str)
-                and isinstance(entry.get("completed_at"), str)
-                and entry.get("status") in {"success", "failed", "skipped"}
-            ][:AUTO_UPDATE_HISTORY_LIMIT]
+            for entry in stored_history:
+                if (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("triggered_at"), str)
+                    and isinstance(entry.get("completed_at"), str)
+                    and entry.get("status") in {"success", "failed", "skipped"}
+                ):
+                    history.append({
+                        "triggered_at": entry["triggered_at"],
+                        "completed_at": entry["completed_at"],
+                        "status": entry["status"],
+                        "trigger": entry.get("trigger") if entry.get("trigger") in {"manual", "scheduled"} else "scheduled",
+                        "operation": entry.get("operation") if entry.get("operation") in {"sync_apply", "sync_filters"} else "sync_apply",
+                        "filter_count": entry.get("filter_count") if isinstance(entry.get("filter_count"), int) else 0,
+                        "detail": entry.get("detail") if isinstance(entry.get("detail"), str) else None,
+                        "downloaded": _history_string_list(entry.get("downloaded")),
+                        "redownloaded": _history_string_list(entry.get("redownloaded")),
+                        "verified_existing": _history_string_list(entry.get("verified_existing")),
+                    })
+                if len(history) >= AUTO_UPDATE_HISTORY_LIMIT:
+                    break
 
     with _auto_update_state_lock:
         _auto_update_enabled = enabled
         _auto_update_hour = hour
         _auto_update_history = history
         _auto_update_active_since = None
+
+
+def _history_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
 
 
 def _persist_auto_update_state_locked() -> None:
@@ -1041,6 +1068,26 @@ def _append_auto_update_history(entry: dict[str, object]) -> None:
             logger.error("Could not persist auto-update history: %s", exc)
 
 
+def _record_sync_history(
+    trigger: str,
+    operation: str,
+    triggered_at: datetime,
+    response: SyncFiltersResponse | SyncApplyResponse,
+) -> None:
+    _append_auto_update_history({
+        "triggered_at": triggered_at.isoformat(timespec="seconds"),
+        "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "status": "success" if response.success else "failed",
+        "trigger": trigger,
+        "operation": operation,
+        "filter_count": getattr(response, "filter_count", 0),
+        "detail": response.detail,
+        "downloaded": list(response.downloaded),
+        "redownloaded": list(response.redownloaded),
+        "verified_existing": list(response.verified_existing),
+    })
+
+
 def _local_timezone_label(now: datetime) -> str:
     name = now.tzname() or "local"
     offset = now.utcoffset()
@@ -1067,7 +1114,7 @@ def _auto_update_status_snapshot() -> dict[str, object]:
         active_since = _auto_update_active_since
 
     active = bool(sync_status["active"] and sync_status["operation"] == "auto_sync_apply")
-    live_logs = list(sync_status["logs"]) if active else []
+    live_logs = list(sync_status["logs"]) if sync_status["operation"] == "auto_sync_apply" else []
 
     return {
         "enabled": enabled,
@@ -1129,11 +1176,13 @@ def _run_scheduled_auto_update() -> None:
             "triggered_at": triggered_at.isoformat(timespec="seconds"),
             "completed_at": completed_at.isoformat(timespec="seconds"),
             "status": "skipped",
+            "trigger": "scheduled",
+            "operation": "sync_apply",
+            "filter_count": 0,
             "detail": "Another filter operation was already in progress",
             "downloaded": [],
             "redownloaded": [],
             "verified_existing": [],
-            "logs": ["INFO scheduled update skipped because another filter operation was in progress"],
         })
         return
 
@@ -1162,22 +1211,12 @@ def _run_scheduled_auto_update() -> None:
         )
         sync_operation_logs.set_result(_response_payload(response))
     finally:
+        if response is not None:
+            _record_sync_history("scheduled", "sync_apply", triggered_at, response)
         sync_operation_logs.finish()
-        operation_lock.release()
-        completed_at = datetime.now().astimezone()
         with _auto_update_state_lock:
             _auto_update_active_since = None
-        if response is not None:
-            _append_auto_update_history({
-                "triggered_at": triggered_at.isoformat(timespec="seconds"),
-                "completed_at": completed_at.isoformat(timespec="seconds"),
-                "status": "success" if response.success else "failed",
-                "detail": response.detail,
-                "downloaded": list(response.downloaded),
-                "redownloaded": list(response.redownloaded),
-                "verified_existing": list(response.verified_existing),
-                "logs": list(response.logs[-AUTO_UPDATE_LOG_LINES_LIMIT:]),
-            })
+        operation_lock.release()
 
 
 def _merge_output_logs(
