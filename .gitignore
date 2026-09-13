@@ -5,6 +5,7 @@ filters/**/*.hf
 filters/*.txt
 filters/*.csv
 filters/manifest_current.json
+filters/.auto_update_state.json
 manifest.json
 .codex
 tls/
