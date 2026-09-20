@@ -10,6 +10,21 @@ The CLI and API accept only:
 - CLI: batch credentials from TSV
 - API: batch credentials in the form of username + password, and SHA-256 hashes
 
+## Acquiring your nWebbed API key
+
+1. Make sure you have a Hush Filters license for your **organization**.
+2. Sign in to the **Owner** account, or a **Member** account with delegated permissions for Hush management.
+3. Go to **Product Configs** → **Hushfilters**, using the link for your region:
+
+   - [Global product config page](https://www.nwebbed.com/dashboard/product-configs/hushfilters)
+   - [EU product config page](https://eu.nwebbed.com/dashboard/product-configs/hushfilters)
+
+4. Scroll to **Inventory** and click **Issue Key**. The API key will be issued and displayed at the top of the current screen; scroll up to see it.
+5. Choose a **Slot Name**, enter the IP address you will be running Hush on, then click **Save Slot**.
+6. If you don't know your IP address, attempt to use Hush with the API key you just generated, then refresh the Hushfilters config page. Click **Show Usage** to see the IP address that attempted to connect, and whitelist that IP address in your slot.
+
+Add the issued key to `NWEBBED_API_KEY` in your `.env` file as part of the quick start below.
+
 ## Quick Start
   
 ```
