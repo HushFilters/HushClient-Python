@@ -2,6 +2,7 @@
 Core library for HushFilter bloom filter operations.
 Provides shared manifest-backed filter loading for both CLI and API interfaces.
 """
+import logging
 import json
 import os
 from typing import List, Tuple, Dict, Optional
@@ -58,7 +59,7 @@ class FilterManager:
                 hf = HushFilter(filter_path)
                 self.filters.append((filter_path, hf))
             except Exception as e:
-                print(f"Warning: Failed to load {filter_path}: {e}")
+                logging.getLogger(__name__).exception("Failed to load %s", filter_path)
 
     @staticmethod
     def _extract_filter_prefix(filter_path: str) -> Optional[str]:

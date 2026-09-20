@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
   <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260903c">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260920a">
 </head>
 <body>
   <main class="workspace-shell">
@@ -28,6 +28,7 @@
         <nav class="workspace-nav" aria-label="Tool navigation">
           <a class="workspace-nav-link" href="/ui-check/">Credential Check</a>
           <a class="workspace-nav-link active" href="/ui-sync/">Filter Sync</a>
+          <a class="workspace-nav-link" href="/ui-logs/">Logs</a>
         </nav>
       </header>
 
@@ -43,6 +44,7 @@
                 and show the resulting logs here.
               </p>
 
+              <p class="section-copy">Machine ID: <code id="machine-id">Loading…</code></p>
               <ul class="detail-list">
                 <li>
                   <strong>One-click full apply</strong>
@@ -118,6 +120,8 @@
               <p id="auto-update-message" class="status" aria-live="polite"></p>
             </form>
 
+            <p class="section-copy">Failed scheduled downloads retry every five minutes for up to one hour after the scheduled start. Downloads already running may finish after this window.</p>
+            <p id="retry-status" class="status" aria-live="polite"></p>
             <dl class="schedule-facts">
               <div>
                 <dt>Next update</dt>
@@ -133,13 +137,6 @@
               </div>
             </dl>
 
-            <div class="auto-update-history-heading">
-              <h3>Recent sync history</h3>
-              <span>Latest 20 syncs</span>
-            </div>
-            <div id="auto-update-history" class="auto-update-history">
-              <p class="empty-history">Loading sync history…</p>
-            </div>
           </div>
         </section>
 
@@ -161,10 +158,21 @@
             <pre id="sync-output" class="mono-surface">-</pre>
           </div>
         </section>
+        <section class="surface-card auto-update-card">
+          <div class="surface-card__inner">
+            <div class="auto-update-history-heading">
+              <h3>Recent sync history</h3>
+              <button id="history-toggle" class="action-button action-button--secondary" type="button" aria-expanded="false" aria-controls="auto-update-history">Show all syncs</button>
+            </div>
+            <div id="auto-update-history" class="auto-update-history">
+              <p class="empty-history">Loading sync history…</p>
+            </div>
+          </div>
+        </section>
       </div>
     </section>
   </main>
 
-  <script src="/ui-sync/app.js?v=20260903b" defer></script>
+  <script src="/ui-sync/app.js?v=20260920a" defer></script>
 </body>
 </html>

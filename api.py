@@ -16,7 +16,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -25,7 +25,8 @@ from io import StringIO
 
 from core.filter_core import FilterManager
 from filter_sync.r2_client import R2ClientError
-from filter_sync.sync import SyncError, sync_filters
+from filter_sync.sync import SyncError, sync_filters, _machine_id_from_mac
+from diagnostic_logs import LogSettings, install_logging, uninstall_logging
 from helpers.generate_manifest import generate_manifest
 
 
@@ -33,6 +34,12 @@ from helpers.generate_manifest import generate_manifest
 filter_manager: Optional[FilterManager] = None
 operation_lock = threading.Lock()
 logger = logging.getLogger("uvicorn.error")
+sync_logger = logging.getLogger("hushclient.sync")
+diagnostic_logs = None
+AUTO_UPDATE_RETRY_SECONDS = 300
+AUTO_UPDATE_RETRY_WINDOW_SECONDS = 3600
+_auto_update_retry_at: str | None = None
+_auto_update_retry_until: str | None = None
 AUTO_UPDATE_HISTORY_LIMIT = 20
 AUTO_UPDATE_STATE_PATH = "filters/.auto_update_state.json"
 
@@ -68,6 +75,8 @@ class _SyncOperationLogState:
             self._logs.append(line)
 
     def set_result(self, payload: dict[str, object]) -> None:
+        sync_logger.log(logging.INFO if payload.get("success") else logging.ERROR,
+                        "%s: %s", self._operation, payload.get("detail") or ("Completed" if payload.get("success") else "Failed"))
         with self._lock:
             success = payload.get("success")
             self._success = success if isinstance(success, bool) else None
@@ -140,34 +149,65 @@ async def lifespan(app: FastAPI):
     global _auto_update_wake_event
     auto_update_task: asyncio.Task[None] | None = None
     
-    # Startup: Load filters
-    manifest_path = _current_filter_configuration()
-    
+    global diagnostic_logs
+    diagnostic_logs, attached = install_logging()
+    previous_thread_hook = threading.excepthook
+    previous_sys_hook = sys.excepthook
+    loop = asyncio.get_running_loop()
+    previous_loop_handler = loop.get_exception_handler()
+
+    def thread_error(args):
+        logger.error("Unhandled thread error in %s", args.thread.name,
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        previous_thread_hook(args)
+
+    def process_error(exc_type, value, traceback):
+        logger.critical("Unhandled process error", exc_info=(exc_type, value, traceback))
+        previous_sys_hook(exc_type, value, traceback)
+
+    def task_error(active_loop, context):
+        exc = context.get("exception")
+        logger.error("Unhandled asynchronous task error: %s", context.get("message"),
+                     exc_info=(type(exc), exc, exc.__traceback__) if exc else None)
+        if previous_loop_handler:
+            previous_loop_handler(active_loop, context)
+        else:
+            active_loop.default_exception_handler(context)
+
+    threading.excepthook = thread_error
+    sys.excepthook = process_error
+    loop.set_exception_handler(task_error)
     try:
-        filter_manager = FilterManager(manifest_path=manifest_path)
-        print(f"Loaded {len(filter_manager.filters)} filters from {manifest_path}")
-        if _is_test_mode_enabled():
-            print("Running in TEST mode (using test_manifest.json)")
-    except Exception as e:
-        print(f"Error loading filters: {e}")
-        raise
-
-    _load_auto_update_state()
-    _auto_update_wake_event = asyncio.Event()
-    auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
-
-    yield
-
-    if auto_update_task is not None:
-        auto_update_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await auto_update_task
-    _auto_update_wake_event = None
-
-    # Shutdown: Close filters
-    if filter_manager:
-        filter_manager.close()
-        print("Closed all filters")
+        manifest_path = _current_filter_configuration()
+        try:
+            filter_manager = FilterManager(manifest_path=manifest_path)
+            logger.info("Loaded %d filters from %s", len(filter_manager.filters), manifest_path)
+        except Exception:
+            logger.exception("Error loading filters")
+            raise
+        _load_auto_update_state()
+        _auto_update_wake_event = asyncio.Event()
+        auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
+        yield
+    finally:
+        if auto_update_task is not None:
+            auto_update_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await auto_update_task
+        _auto_update_wake_event = None
+        try:
+            if filter_manager:
+                filter_manager.close()
+                logger.info("Closed all filters")
+        except Exception:
+            logger.exception("Error closing filters")
+            raise
+        finally:
+            threading.excepthook = previous_thread_hook
+            sys.excepthook = previous_sys_hook
+            loop.set_exception_handler(previous_loop_handler)
+            uninstall_logging(diagnostic_logs, attached)
+            diagnostic_logs = None
 
 
 app = FastAPI(
@@ -180,6 +220,7 @@ app = FastAPI(
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    logger.error("HTTP error: %s %s returned %s", _request.method, _request.scope.get("route", "unknown route"), exc.status_code)
     return JSONResponse(
         status_code=exc.status_code,
         content=_with_test_mode({"detail": exc.detail}),
@@ -189,6 +230,7 @@ async def http_exception_handler(_request: Request, exc: StarletteHTTPException)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    logger.error("Request validation failed: %s (%d errors)", _request.method, len(exc.errors()))
     return JSONResponse(
         status_code=422,
         content=_with_test_mode({"detail": exc.errors()}),
@@ -197,6 +239,7 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
 
 @app.exception_handler(Exception)
 async def unexpected_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    logger.error("Unhandled request error", exc_info=(type(exc), exc, exc.__traceback__))
     return JSONResponse(
         status_code=500,
         content=_with_test_mode({"detail": f"Internal server error: {exc}"}),
@@ -289,6 +332,7 @@ class ReloadFiltersResponse(ApiResponse):
 
 class SyncApplyResponse(ApiResponse):
     """Response model for sync + manifest update + reload sequence."""
+    retryable: bool = False
     success: bool
     manifest_path: Optional[str] = None
     output_file: Optional[str] = None
@@ -357,6 +401,9 @@ class AutoUpdateStatusResponse(ApiResponse):
     active_since: Optional[str] = None
     live_logs: List[str] = Field(default_factory=list)
     history: List[AutoUpdateRun] = Field(default_factory=list)
+    machine_id: Optional[str] = None
+    retry_at: Optional[str] = None
+    retry_until: Optional[str] = None
 
 
 # API Endpoints
@@ -369,6 +416,8 @@ async def root():
         "endpoints": {
             "ui_check": "/ui-check",
             "ui_sync": "/ui-sync",
+            "ui_logs": "/ui-logs",
+            "logs": "/logs",
             "health": "/health",
             "stats": "/stats",
             "check": "/check",
@@ -409,7 +458,73 @@ async def ui_sync_page():
     return _render_ui_page("ui-sync")
 
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    response = await call_next(request)
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    # Avoid logging bodies, query strings, and arbitrary requested paths.
+    # Successful polling, health checks, and page reads must not rotate away
+    # diagnostics, even when Everything or Request summaries is enabled.
+    failed = response.status_code >= 400
+    action = request.method not in {"GET", "HEAD"}
+    if failed or (action and route not in {"/logs", "/logs/settings", "/logs/download"}):
+        logging.getLogger("hushclient.requests").log(
+            logging.ERROR if response.status_code >= 400 else logging.INFO,
+            "%s %s -> %d", request.method, route, response.status_code)
+    return response
+
+
+@app.get("/ui-logs", tags=["General"])
+async def ui_logs_redirect():
+    return RedirectResponse(url="/ui-logs/")
+
+
+@app.get("/ui-logs/", tags=["General"])
+async def ui_logs_page():
+    return _render_ui_page("ui-logs")
+
+
+def _diagnostic_logs():
+    if diagnostic_logs is None:
+        raise HTTPException(status_code=503, detail="Diagnostic logging is not initialized")
+    return diagnostic_logs
+
+
+@app.get("/logs", tags=["Logs"])
+async def get_logs():
+    return await run_in_threadpool(_diagnostic_logs().snapshot)
+
+
+@app.put("/logs/settings", tags=["Logs"])
+async def configure_logs(settings: LogSettings):
+    await run_in_threadpool(_diagnostic_logs().configure, settings)
+    return {"settings": settings.model_dump()}
+
+
+@app.delete("/logs", tags=["Logs"])
+async def clear_logs():
+    await run_in_threadpool(_diagnostic_logs().clear)
+    return {"cleared": True}
+
+
+@app.get("/logs/download", tags=["Logs"])
+async def download_logs():
+    snapshot = await run_in_threadpool(_diagnostic_logs().export)
+
+    def chunks():
+        try:
+            while chunk := snapshot.read(64 * 1024):
+                yield chunk
+        finally:
+            snapshot.close()
+
+    return StreamingResponse(chunks(), media_type="text/plain",
+                             headers={"Content-Disposition": 'attachment; filename="hushclient.log"',
+                                      "Cache-Control": "no-store"})
+
+
 # Static UI
+app.mount("/ui-logs", StaticFiles(directory="webui/ui-logs", html=True), name="ui-logs")
 app.mount("/ui-check", StaticFiles(directory="webui/ui-check", html=True), name="ui-check")
 app.mount("/ui-sync", StaticFiles(directory="webui/ui-sync", html=True), name="ui-sync")
 app.mount("/ui-assets", StaticFiles(directory="webui/assets"), name="ui-assets")
@@ -691,14 +806,15 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
     sync_logger = logging.getLogger("filter_sync")
     previous_level = sync_logger.level
     previous_propagate = sync_logger.propagate
-    sync_logger.setLevel(logging.INFO)
-    sync_logger.propagate = False
+    sync_logger.setLevel(logging.DEBUG)
+    sync_logger.propagate = True
     for handler in (capture_handler, live_handler, stdout_handler):
         sync_logger.addHandler(handler)
 
     try:
         result = sync_filters()
     except (R2ClientError, SyncError) as exc:
+        sync_logger.exception("Filter sync failed")
         capture_handler.flush()
         logs = _split_log_lines(log_stream.getvalue())
         return SyncFiltersResponse(
@@ -707,6 +823,7 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
             detail=str(exc),
         )
     except Exception as exc:
+        sync_logger.exception("Unexpected filter sync failure")
         capture_handler.flush()
         logs = _split_log_lines(log_stream.getvalue())
         return SyncFiltersResponse(
@@ -746,14 +863,15 @@ def _run_manifest_update_with_logs() -> ManifestUpdateResponse:
     manifest_logger = logging.getLogger("helpers.generate_manifest")
     previous_level = manifest_logger.level
     previous_propagate = manifest_logger.propagate
-    manifest_logger.setLevel(logging.INFO)
-    manifest_logger.propagate = False
+    manifest_logger.setLevel(logging.DEBUG)
+    manifest_logger.propagate = True
     manifest_logger.addHandler(handler)
 
     try:
         with redirect_stdout(stdout_stream), redirect_stderr(stderr_stream):
             exit_code = generate_manifest("filters", "manifest.json")
     except Exception as exc:
+        manifest_logger.exception("Manifest update failed")
         handler.flush()
         logs = _merge_output_logs(log_stream, stdout_stream, stderr_stream)
         return ManifestUpdateResponse(
@@ -769,6 +887,7 @@ def _run_manifest_update_with_logs() -> ManifestUpdateResponse:
 
     logs = _merge_output_logs(log_stream, stdout_stream, stderr_stream)
     if exit_code != 0:
+        sync_logger.error("Manifest generation failed: %s", "\n".join(logs))
         return ManifestUpdateResponse(
             success=False,
             output_file="manifest.json",
@@ -781,6 +900,7 @@ def _run_manifest_update_with_logs() -> ManifestUpdateResponse:
             manifest = json.load(handle)
         filter_count = len(manifest.get("filters", []))
     except Exception:
+        sync_logger.exception("Could not read generated manifest")
         filter_count = 0
 
     return ManifestUpdateResponse(
@@ -807,6 +927,7 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
         return SyncApplyResponse(
             success=False,
             manifest_path=sync_response.manifest_path,
+            retryable=True,
             downloaded=sync_response.downloaded,
             redownloaded=sync_response.redownloaded,
             verified_existing=sync_response.verified_existing,
@@ -877,6 +998,7 @@ def _run_sync_apply_background_job() -> None:
         response = _run_sync_apply_with_logs()
         sync_operation_logs.set_result(_response_payload(response))
     except Exception as exc:
+        sync_logger.exception("Background sync/apply failed")
         response = SyncApplyResponse(
             success=False,
             detail=f"Unexpected sync/apply error: {exc}",
@@ -914,6 +1036,7 @@ def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
             logs=logs,
         )
     except Exception as exc:
+        sync_logger.exception("Filter reload failed")
         return ReloadFiltersResponse(
             success=False,
             logs=logs,
@@ -1126,6 +1249,9 @@ def _auto_update_status_snapshot() -> dict[str, object]:
         "active_since": active_since if active else None,
         "live_logs": live_logs,
         "history": history,
+        "machine_id": _machine_id_from_mac(),
+        "retry_at": _auto_update_retry_at,
+        "retry_until": _auto_update_retry_until,
     }
 
 
@@ -1162,10 +1288,43 @@ async def _auto_update_scheduler_loop() -> None:
             wake_event.clear()
             continue
 
-        await asyncio.to_thread(_run_scheduled_auto_update)
+        await _run_scheduled_retry_window(next_run, wake_event)
 
 
-def _run_scheduled_auto_update() -> None:
+async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asyncio.Event) -> None:
+    global _auto_update_retry_at, _auto_update_retry_until
+    deadline = scheduled_at + timedelta(seconds=AUTO_UPDATE_RETRY_WINDOW_SECONDS)
+    _auto_update_retry_until = deadline.isoformat(timespec="seconds")
+    try:
+        while True:
+            response = await asyncio.to_thread(_run_scheduled_auto_update)
+            if response is not None and (response.success or not response.retryable):
+                return
+            now = datetime.now().astimezone()
+            retry_at = now + timedelta(seconds=AUTO_UPDATE_RETRY_SECONDS)
+            if retry_at >= deadline:
+                sync_logger.error("Scheduled retry window ended; no further retries for %s", scheduled_at.isoformat())
+                return
+            if wake_event.is_set():
+                wake_event.clear()
+                return
+            _auto_update_retry_at = retry_at.isoformat(timespec="seconds")
+            sync_logger.warning("Scheduled sync will retry at %s; deadline %s", _auto_update_retry_at, _auto_update_retry_until)
+            try:
+                await asyncio.wait_for(wake_event.wait(), timeout=AUTO_UPDATE_RETRY_SECONDS)
+            except asyncio.TimeoutError:
+                if datetime.now().astimezone() >= deadline:
+                    return
+                _auto_update_retry_at = None
+            else:
+                wake_event.clear()
+                return
+    finally:
+        _auto_update_retry_at = None
+        _auto_update_retry_until = None
+
+
+def _run_scheduled_auto_update() -> SyncApplyResponse | None:
     global _auto_update_active_since
 
     triggered_at = datetime.now().astimezone()
@@ -1195,8 +1354,8 @@ def _run_scheduled_auto_update() -> None:
         response = _run_sync_apply_with_logs()
         sync_operation_logs.set_result(_response_payload(response))
         if response.success:
-            logger.info("Scheduled filter sync, manifest update, and reload completed successfully")
-            return
+            sync_logger.info("Scheduled filter sync, manifest update, and reload completed successfully")
+            return response
 
         logger.error(
             "Scheduled filter sync, manifest update, and reload failed: %s",
@@ -1217,6 +1376,7 @@ def _run_scheduled_auto_update() -> None:
         with _auto_update_state_lock:
             _auto_update_active_since = None
         operation_lock.release()
+    return response
 
 
 def _merge_output_logs(
@@ -1236,6 +1396,8 @@ def _split_log_lines(raw_logs: str) -> List[str]:
 
 def _append_live_sync_log(line: str) -> None:
     sync_operation_logs.append(line)
+    level, _, message = line.partition(" ")
+    sync_logger.log(getattr(logging, level, logging.INFO), message)
 
 
 def _response_payload(response: ApiResponse) -> dict[str, object]:

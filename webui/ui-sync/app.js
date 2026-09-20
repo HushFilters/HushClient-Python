@@ -143,6 +143,9 @@ function renderAutoUpdateHistory(history, activeRun = null) {
     runs.unshift(activeRun);
   }
 
+  const toggle = document.getElementById("history-toggle");
+  toggle.hidden = runs.length <= 1;
+
   if (runs.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty-history";
@@ -151,9 +154,10 @@ function renderAutoUpdateHistory(history, activeRun = null) {
     return;
   }
 
-  runs.forEach((run) => {
+  runs.forEach((run, index) => {
     const item = document.createElement("article");
     item.className = "history-item";
+    item.hidden = index > 0 && !historyExpanded;
 
     const header = document.createElement("div");
     header.className = "history-item__header";
@@ -182,6 +186,17 @@ function renderAutoUpdateHistory(history, activeRun = null) {
   });
 }
 
+let historyExpanded = false;
+document.getElementById("history-toggle").addEventListener("click", () => {
+  historyExpanded = !historyExpanded;
+  const toggle = document.getElementById("history-toggle");
+  toggle.setAttribute("aria-expanded", String(historyExpanded));
+  toggle.textContent = historyExpanded ? "Show latest only" : "Show all syncs";
+  document.querySelectorAll("#auto-update-history .history-item").forEach((item, index) => {
+    item.hidden = index > 0 && !historyExpanded;
+  });
+});
+
 let autoUpdateFormDirty = false;
 let autoUpdateWasActive = false;
 
@@ -196,6 +211,9 @@ function syncAutoUpdateHourAvailability() {
 }
 
 function renderAutoUpdateStatus(payload, applyFormValues = true) {
+  document.getElementById("machine-id").textContent = payload.machine_id || "Unavailable (no hardware MAC detected)";
+  document.getElementById("retry-status").textContent = payload.retry_at
+    ? `Next retry: ${formatScheduledTime(payload.retry_at)}. Retry window ends: ${formatScheduledTime(payload.retry_until)}.` : "";
   const badge = document.getElementById("auto-update-badge");
   badge.textContent = payload.active ? "Running" : (payload.enabled ? "Enabled" : "Disabled");
   badge.className = `schedule-badge ${(payload.enabled || payload.active) ? "schedule-badge--enabled" : ""}`.trim();

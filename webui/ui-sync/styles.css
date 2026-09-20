@@ -359,3 +359,8 @@
     align-items: flex-start;
   }
 }
+
+.history-item[hidden] { display: none; }
+#machine-id { overflow-wrap: anywhere; }
+#history-toggle { width: auto; flex-shrink: 0; }
+#history-toggle[hidden], #retry-status:empty { display: none; }

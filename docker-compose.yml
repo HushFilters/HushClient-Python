@@ -38,6 +38,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       # Mount filters directory for live updates
+      - ./logs:/app/logs:rw
       - ./filters:/app/filters:rw
       - ./manifest.json:/app/manifest.json:rw
       - ./test_manifest.json:/app/test_manifest.json:ro

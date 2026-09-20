@@ -1,3 +1,4 @@
+import logging
 import struct
 import mmap
 import gzip
@@ -149,13 +150,13 @@ class HushFilter:
             )
             return True
         except InvalidSignature:
-            print("Signature is invalid.")
+            logging.getLogger(__name__).error("Signature is invalid")
             return False
         except (TypeError, ValueError) as e:
-            print ("Invalid signature: %s", str(e))
+            logging.getLogger(__name__).exception("Invalid signature")
             return False
         except Exception as e:
-            print("Unexpected error during signature validation:", e)
+            logging.getLogger(__name__).exception("Unexpected error during signature validation")
             return False
         
     def validate_header(self):
@@ -172,7 +173,7 @@ class HushFilter:
         if self.verify_signature(header_chunk_with_zeroed_header_signature, header_signature):
             print("Header signature validated successfully.")
         else:
-            print("Header signature validation failed.")
+            logging.getLogger(__name__).error("Header signature validation failed")
     
     def validate_chunks(self):
         """Validate header and a subset of chunks, skipping unsigned data between header and foffset."""

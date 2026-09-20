@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hush Client Logs</title>
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
+  <link rel="stylesheet" href="/ui-logs/styles.css?v=20260920a">
+</head>
+<body>
+  <main class="workspace-shell"><section class="workspace-panel">
+    {{TEST_MODE_BANNER}}
+      <header class="workspace-header">
+        <div class="workspace-brand">
+          <img
+            class="workspace-brand__logo"
+            src="/ui-assets/images/nWebbed_PrimaryTransparent.svg"
+            alt="nWebbed"
+          >
+          <div class="workspace-brand__copy">
+            <p class="workspace-brand__eyebrow">HushFilter Operations</p>
+            <p class="workspace-brand__caption">Workflow for sync, manifest rotation, and live filter reloads.</p>
+          </div>
+        </div>
+
+        <nav class="workspace-nav" aria-label="Tool navigation">
+          <a class="workspace-nav-link" href="/ui-check/">Credential Check</a>
+          <a class="workspace-nav-link" href="/ui-sync/">Filter Sync</a>
+          <a class="workspace-nav-link active" href="/ui-logs/">Logs</a>
+        </nav>
+      </header>
+
+
+    <div class="workspace-body">
+      <section class="surface-card"><div class="surface-card__inner">
+        <h1 class="section-title">Client Logs</h1>
+        <p class="section-copy">View and download local diagnostics, including sync failures and application errors.</p>
+        <p id="log-size">Loading log size…</p>
+        <form id="log-settings">
+          <fieldset disabled id="log-options">
+            <legend>What to record</legend>
+            <p>Selections are combined. Everything includes all categories. Off clears all selections. Successful GET/HEAD requests (polling, health checks, and page loads) are always omitted; failed requests remain available.</p>
+            <div class="log-options">
+              <label><input type="checkbox" name="everything"> Everything (including debug)</label>
+              <label><input type="checkbox" name="critical"> Critical errors</label>
+              <label><input type="checkbox" name="errors"> All errors (including critical)</label>
+              <label><input type="checkbox" name="warnings"> Warnings</label>
+              <label><input type="checkbox" name="sync"> Sync logs</label>
+              <label><input type="checkbox" name="application"> Application logs</label>
+              <label><input type="checkbox" name="requests"> Request summaries</label>
+              <label><input type="checkbox" id="logs-off"> Off</label>
+            </div>
+          </fieldset>
+          <button id="save-settings" disabled class="action-button" type="submit">Save settings</button>
+        </form>
+        <p id="settings-status" class="status" role="status"></p>
+      </div></section>
+      <section class="surface-card"><div class="surface-card__inner">
+        <div class="log-actions">
+          <button id="refresh-logs" class="action-button action-button--secondary" type="button">Refresh logs</button>
+          <a class="action-button action-button--secondary" href="/logs/download" download>Download all retained logs</a>
+          <button id="clear-logs" class="action-button action-button--amber" type="button">Clear all logs</button>
+        </div>
+        <p id="log-status" class="status" role="status"></p>
+        <pre id="log-output" class="mono-surface" tabindex="0" aria-label="Log contents">Loading…</pre>
+      </div></section>
+    </div>
+  </section></main>
+  <script src="/ui-logs/app.js?v=20260920a" defer></script>
+</body>
+</html>

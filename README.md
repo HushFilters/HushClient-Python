@@ -171,6 +171,18 @@ To use your own internal mTLS material, replace the complete `tls/internal/` set
 
 The bootstrap script does not overwrite existing certs. If you want to regenerate defaults, stop the stack and remove `./tls`, then run `docker compose up` again. The generated certs are for bootstrapping and local deployments; compliance-sensitive deployments should replace them with certificates issued and rotated by your internal PKI.
 
+## Diagnostics and scheduled retries
+
+The Filter Sync page at `/ui-sync/` displays the machine ID sent to nWebbed. This ID is derived from the runtime's MAC address, so it can change when a container is recreated. If no hardware MAC is detected, the page shows that the ID is unavailable. Recent sync history appears below the operational log and shows only the newest entry until expanded.
+
+Open **Logs** at `/ui-logs/` to view local diagnostics, see their total retained size, download all retained logs, clear them, and save logging settings. Checkbox selections are combined: choose **Critical errors** alone for critical-only logging, **Sync logs** alone for sync-only logging, or combine categories. **Everything** includes debug messages; **Off** clears all selections. Turning logging off keeps existing files until you clear them.
+
+By default, errors, warnings, and sync activity are recorded. Logs include application startup/load failures, request failures, background exceptions, and sync/download failures. Request summaries omit request bodies and query strings. Successful GET/HEAD requests (including status polling, health checks, and page loads) are not recorded, even with Everything enabled, so routine reads cannot rotate away useful diagnostics. Failed requests and other application errors remain eligible under the selected categories. Logging covers the Python application; Docker/nginx logs and failures before the application starts remain available through `docker compose logs`.
+
+Logs are stored in `logs/hushclient.log`, with three rotated backups of up to 10 MiB each (approximately 40 MiB retained in total). The UI previews the latest 256 KiB; the download includes all retained files. Settings are saved in `logs/settings.json`. Docker Compose mounts `./logs` so diagnostics and settings survive container recreation. Set `HUSHCLIENT_LOG_DIR` to change this directory outside Docker, or mount the matching directory when overriding it in Docker.
+
+Scheduled updates retry failed filter sync/download stages every five minutes, for up to one hour after the original scheduled start. Each attempt is recorded in history and the log file. Existing partial downloads are reused by the downloader. The sync page shows the next retry and the window deadline. No new retry begins after the deadline; an attempt already running may finish later. Manifest-generation and reload failures do not trigger download retries. Changing or disabling the schedule cancels pending retries; a running attempt is allowed to finish. Restarting the app resets a pending retry window, and the next daily schedule applies.
+
 ## CLI Usage
 
 ### Filter Source

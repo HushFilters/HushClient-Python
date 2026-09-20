@@ -47,6 +47,7 @@ class DummyFilterManager:
 
 @pytest.fixture(autouse=True)
 def isolate_auto_update_state(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HUSHCLIENT_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update-state.json"))
 
 
@@ -78,7 +79,7 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         sync_response = client.get("/ui-sync/")
         assert sync_response.status_code == 200
         assert "sync, update manifest, and reload filters" in sync_response.text
-        assert "/ui-sync/app.js?v=20260903b" in sync_response.text
+        assert "/ui-sync/app.js?v=20260920a" in sync_response.text
         assert "Daily Auto-Update" in sync_response.text
         assert "Recent sync history" in sync_response.text
         assert "sync filters from nWebbed" in sync_response.text
@@ -209,7 +210,9 @@ def test_sync_filters_endpoint_returns_failure_logs(monkeypatch) -> None:
     assert payload["success"] is False
     assert payload["test_mode"] is False
     assert payload["detail"] == "zip verification failed"
-    assert payload["logs"] == ["ERROR ZIP MD5 mismatch path=filters/a.zip"]
+    assert payload["logs"][0] == "ERROR ZIP MD5 mismatch path=filters/a.zip"
+    assert "ERROR Filter sync failed" in payload["logs"]
+    assert any("zip verification failed" in line for line in payload["logs"])
 
 
 def test_sync_status_endpoint_reports_live_logs_during_running_sync(

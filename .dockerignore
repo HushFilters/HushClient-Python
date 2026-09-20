@@ -19,3 +19,5 @@ test_*.tsv
 debug_*.py
 *.hf.txt
 .uv/
+
+logs/
