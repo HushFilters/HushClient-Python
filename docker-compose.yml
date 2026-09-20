@@ -20,9 +20,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    dns:
-      - 1.1.1.1
-      - 1.0.0.1
+    # dns:
+      # - 1.1.1.1
+      # - 1.0.0.1
     depends_on:
       tls-cert-init:
         condition: service_completed_successfully
