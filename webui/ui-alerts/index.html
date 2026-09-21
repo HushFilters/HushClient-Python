@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Alerts</title>
-  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260920b">
-  <link rel="stylesheet" href="/ui-alerts/styles.css?v=20260920b">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260921a">
+  <link rel="stylesheet" href="/ui-alerts/styles.css?v=20260921a">
 </head>
 <body>
   <main class="workspace-shell"><section class="workspace-panel">
@@ -51,7 +51,9 @@
               <label class="alert-choice"><input name="event" value="filter_failure" type="checkbox"><span><strong>Filter loading and manifest failures</strong><small>Startup loading, local manifest generation, and live reload failures.</small></span></label>
               <label class="alert-choice"><input name="event" value="no_filters" type="checkbox"><span><strong>No filters loaded</strong><small>Detected at startup, reload, or when you enable this alert.</small></span></label>
               <label class="alert-choice"><input name="event" value="service_error" type="checkbox"><span><strong>Critical service errors</strong><small>Unhandled request/background exceptions and other HTTP 5xx responses.</small></span></label>
+              <label class="alert-choice"><input name="event" value="certificate_expiry" type="checkbox"><span><strong>Certificate expiry and validity</strong><small>Expiring, expired, not-yet-valid, missing, or unreadable public and internal TLS certificates.</small></span></label>
             </div>
+            <label class="field-stack cooldown-field"><span class="field-label">Certificate expiry warning (days)</span><input id="certificate_warning_days" class="app-input" type="number" min="1" max="365" value="30" required><span class="field-help">Certificates are checked at startup, hourly, and when settings are saved.</span></label>
             <label class="field-stack cooldown-field"><span class="field-label">Repeat-alert cooldown (minutes)</span><input id="cooldown_minutes" class="app-input" type="number" min="1" max="1440" value="15" required><span class="field-help">At most one automatic email attempt per category in this interval, including scheduled retries.</span></label>
             <div class="alert-actions">
               <button id="save-alerts" class="action-button" type="submit">Save settings</button>
@@ -65,6 +67,13 @@
         <p class="section-copy">Email alerts require the client and SMTP connection to be available. Use external monitoring for host outages or a stopped container.</p>
       </div></section>
       <section class="surface-card"><div class="surface-card__inner">
+        <h2 class="alert-heading">TLS certificate status</h2>
+        <p class="section-copy">Expiry checks inspect mounted certificate files and all supplied chain certificates. After replacement, recreate the affected containers to load the new files.</p>
+        <p id="certificate-status" class="status" role="status">Loading certificate status…</p>
+        <div id="certificate-list"></div>
+        <button id="refresh-certificates" class="action-button action-button--secondary" type="button">Refresh certificate status</button>
+      </div></section>
+      <section class="surface-card"><div class="surface-card__inner">
         <h2 class="alert-heading">Recent email delivery attempts</h2>
         <p class="section-copy">Up to 20 attempts from this process. SMTP acceptance does not guarantee inbox delivery.</p>
         <div id="alert-history">No delivery attempts yet.</div>
@@ -72,6 +81,6 @@
     </div>
     {{WORKSPACE_FOOTER}}
   </section></main>
-  <script src="/ui-alerts/app.js?v=20260920b" defer></script>
+  <script src="/ui-alerts/app.js?v=20260921a" defer></script>
 </body>
 </html>

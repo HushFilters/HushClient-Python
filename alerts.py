@@ -21,12 +21,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-Event = Literal["sync_failure", "filter_failure", "no_filters", "service_error"]
+Event = Literal["sync_failure", "filter_failure", "no_filters", "service_error", "certificate_expiry"]
 EVENT_LABELS = {
     "sync_failure": "Filter sync failed",
     "filter_failure": "Filter loading or manifest update failed",
     "no_filters": "No filters loaded",
     "service_error": "Critical service error",
+    "certificate_expiry": "TLS certificate expiry or validity issue",
 }
 logger = logging.getLogger("hushclient.alerts")
 
@@ -43,6 +44,7 @@ class AlertSettings(BaseModel):
     recipients: list[str] = Field(default_factory=list, max_length=50)
     events: list[Event] = Field(default_factory=lambda: list(EVENT_LABELS))
     cooldown_minutes: int = Field(default=15, ge=1, le=1440)
+    certificate_warning_days: int = Field(default=30, ge=1, le=365)
 
     @field_validator("smtp_host", "username", "sender")
     @classmethod

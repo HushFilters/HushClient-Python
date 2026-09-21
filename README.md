@@ -45,6 +45,7 @@ Enable any combination of:
 - **Filter loading and manifest failures:** startup loading, partial filter loading, local manifest generation, and reload failures.
 - **No filters loaded:** detected at startup, reload, or when saving enabled alert settings.
 - **Critical service errors:** unhandled request/background errors and other HTTP 5xx responses. Sync and SMTP failures are handled separately to avoid duplicate notifications and email loops.
+- **Certificate expiry and validity:** expiring, expired, not-yet-valid, missing, or unreadable customer-facing/internal TLS certificates, including supplied chains. Choose the warning window on Alerts (default 30 days). Existing saved alert selections are retained; explicitly select this new category to enable its emails.
 
 Alerts are disabled by default. The first qualifying event queues an email; repeat attempts in the same category are suppressed for the configured cooldown (default 15 minutes), including scheduled sync retries. Cooldowns and the latest 20 delivery attempts are kept in memory and reset on restart. Saving settings resets cooldowns. SMTP failures appear on the Alerts page and in diagnostic logs without interrupting sync or credential checks. Queued alerts use the current saved configuration; disabling a category cancels its queued sends. Email content includes the client hostname, UTC time, and issue category, without request bodies, credentials, or raw exception text.
 
@@ -74,6 +75,9 @@ using `GET` with header `Authorization: HFKey <NWEBBED_API_KEY>`.
 cp manifest.json.EXAMPLE manifest.json
 
 docker compose build
+
+# Create/validate certificate files before Compose binds individual files.
+docker compose run --rm tls-cert-init
 
 docker compose up
 
@@ -155,6 +159,7 @@ uv run uvicorn api:app --reload
 
 # Start API Container with nginx public TLS and internal nginx-to-API mTLS
 docker compose build
+docker compose run --rm tls-cert-init
 docker compose up -d
 
 # Credential check
@@ -173,38 +178,148 @@ Swagger docs are available at https://localhost/docs
 
 ### Docker TLS and Internal mTLS
 
-`docker compose up` starts three services:
+The services use customer-facing HTTPS at nginx and internal mTLS between nginx and Uvicorn:
 
-- `tls-cert-init` creates default self-signed certificates under `./tls` when no certificates are present.
-- `hushfilter-api` runs Uvicorn on private Docker port `8443` with TLS enabled and requires a client certificate.
-- `nginx` publishes ports `80` and `443`, redirects HTTP to HTTPS, and connects to `hushfilter-api` with an internal client certificate.
+- `tls-cert-init` is a one-shot provisioning/checking service. It alone mounts the host `./tls` tree read/write, including a local CA signing key when one exists. Its inherited application health check is disabled.
+- `hushfilter-api` runs on private Docker port `8443` with a server certificate and requires trusted client certificates. Its local health check has a separate client identity.
+- `nginx` publishes ports `80`/`443`, redirects HTTP to HTTPS, and authenticates to the API with its own mTLS client certificate.
 
-The generated/default certificate layout is:
+Generate the files **before the first `docker compose up`**, and before upgrading an existing installation to these mounts:
+
+```bash
+docker compose build
+docker compose run --rm tls-cert-init
+docker compose up -d
+```
+
+Individual file mounts deliberately fail when files are missing instead of creating directories at certificate paths. On upgrade, the initializer adds `healthcheck.crt`/`healthcheck.key` using the existing local CA, leaving valid existing certificates unchanged. If your CA is managed elsewhere and its signing key is absent, supply this additional client certificate/key from your PKI before starting the services. Set its extended key usage to client authentication.
+
+If startup reports `Is a directory: '/app/tls/internal/healthcheck.crt'` (or another certificate/key path), an earlier file bind mount may have created a directory before the file existed. Docker documents this behavior for [automatically created bind-mount sources](https://docs.docker.com/engine/storage/bind-mounts/). The initializer removes **empty directories only** at expected certificate/key paths before generating missing pairs. It leaves existing certificate files unchanged, refuses populated directories and directory symlinks, and never replaces an existing CA to repair a missing leaf. `--check-only` reports the problem without removing anything.
+
+To recover, run these commands individually from the project directory (also valid in PowerShell), proceeding only when each succeeds:
+
+```powershell
+docker compose down
+docker compose build
+docker compose run --rm --no-deps tls-cert-init
+docker compose up -d
+```
+
+This removes the failed containers before repairing their file mounts and rebuilds the initializer with the recovery code. It retains the host's certificates, filters, and settings. If a certificate path contains data, inspect it and restore the correct file before retrying; do not delete the `tls` tree.
+
+The host certificate layout is:
 
 ```text
 tls/
   public/
-    fullchain.pem          # public/customer-facing nginx certificate
-    privkey.pem            # public/customer-facing nginx private key
+    fullchain.pem          # customer-facing leaf followed by intermediate certificates
+    privkey.pem            # customer-facing private key
   internal/
-    ca.crt                 # internal CA trusted by nginx and Uvicorn
-    ca.key                 # internal CA private key for generated defaults
-    hushfilter-api.crt     # Uvicorn server certificate
-    hushfilter-api.key     # Uvicorn server private key
-    nginx-client.crt       # nginx client certificate for mTLS
-    nginx-client.key       # nginx client private key for mTLS
+    ca.crt                 # trusted internal CA certificate(s); no private material
+    ca.key                 # optional LOCAL signing key: provisioning service/host only
+    hushfilter-api.crt     # API server leaf, followed by intermediates if required
+    hushfilter-api.key     # API server private key
+    nginx-client.crt       # nginx mTLS client leaf/chain
+    nginx-client.key       # nginx mTLS client private key
+    healthcheck.crt        # dedicated API health-check client leaf/chain
+    healthcheck.key        # dedicated API health-check client private key
 ```
 
-To use a customer-facing certificate, replace:
+Only these keys enter the long-running containers:
 
-```text
-tls/public/fullchain.pem
-tls/public/privkey.pem
+| Container | Private keys mounted read-only |
+| --- | --- |
+| `hushfilter-api` | `internal/hushfilter-api.key`, `internal/healthcheck.key` |
+| `nginx` | `public/privkey.pem`, `internal/nginx-client.key` |
+
+Both services receive `internal/ca.crt` and the certificates required for their own TLS connections. The API also receives **only the public certificate files** `public/fullchain.pem` and `internal/nginx-client.crt` for expiry monitoring. Neither running service receives `internal/ca.key`, nor the other service's private keys. An external PKI's CA signing key can remain entirely outside this host: a complete externally issued certificate set does not require `ca.key` locally. Back up any locally managed signing key outside the repository with restricted access; generated private files use mode `0600` on POSIX.
+
+#### Expiry checks and alerts
+
+The initializer validates certificate/key matches, internal issuer signatures/chains, internal server SANs, client/server usage, and the validity dates of every certificate in the supplied PEM files. Default initialization reuses valid files, reports approaching expiry, and exits nonzero on expired, not-yet-valid, unreadable, mismatched, or incomplete material. It never silently rotates an existing CA.
+
+Run a read-only check at any time, or schedule it from your host monitoring:
+
+```bash
+docker compose run --rm tls-cert-init python scripts/ensure_tls_certs.py \
+  --tls-dir /app/tls --check-only --renew-before-days 30
 ```
 
-To use your own internal mTLS material, replace the complete `tls/internal/` set. The API server certificate must be valid for DNS name `hushfilter-api`, because nginx verifies that name when proxying to the app. The nginx client certificate should include client authentication usage and be signed by the CA in `tls/internal/ca.crt`.
+`--check-only` exits **1** when any certificate is invalid/missing or expires within the warning window; otherwise it exits **0**. It does not create or renew files. This host-side check reads keys to validate their matches; the application expiry monitor reads certificates only.
 
-The bootstrap script does not overwrite existing certs. If you want to regenerate defaults, stop the stack and remove `./tls`, then run `docker compose up` again. The generated certs are for bootstrapping and local deployments; compliance-sensitive deployments should replace them with certificates issued and rotated by your internal PKI.
+Compose enables application monitoring with `HUSHCLIENT_TLS_MONITOR=1` and `HUSHCLIENT_TLS_DIR=/app/tls`. It runs at startup, hourly, and when alert settings are saved. On **Alerts**, select **Certificate expiry and validity**, choose **Certificate expiry warning (days)** (1–365, default 30), configure SMTP, and enable automatic alerts. The category uses the normal alert cooldown. The **TLS certificate status** panel and `GET /alerts/certificates` provide an on-demand read-only expiry check, even when email alerts are disabled. For a plain-HTTP development process, monitoring is off unless explicitly enabled; custom TLS deployments must set these environment variables themselves.
+
+The application's check reports certificate validity dates and readability, not a live handshake or full PKI/revocation validation. Missing or malformed TLS material can prevent Uvicorn from starting before application alerts run. Use the read-only preflight and external availability/TLS monitoring for those failures and for host/container outages. Expiry alerts never renew certificates or reload services automatically.
+
+#### Renewing bootstrap certificates with a stable CA
+
+Generated leaves default to 825 days; a **new** internal CA defaults to 3650 days. `--valid-days` and `--ca-valid-days` change issuance lifetimes; they do not extend an existing CA. Internal leaves are capped at that CA's expiry. Trust the internal CA certificate, rather than pinning individual server certificates, so renewing a leaf under the same CA does not require distributing a new trust anchor.
+
+Take a protected backup first, then renew leaves approaching expiry:
+
+```bash
+docker compose run --rm tls-cert-init python scripts/ensure_tls_certs.py \
+  --tls-dir /app/tls --renew --renew-before-days 30
+
+docker compose run --rm tls-cert-init python scripts/ensure_tls_certs.py \
+  --tls-dir /app/tls --check-only --renew-before-days 30
+```
+
+`--renew` replaces only expiring self-signed public certificates and internal leaves for which the local CA key is available. It reuses the existing leaf keys and **retains the internal CA certificate and key**. Internal renewal refuses a CA that is expired, not yet valid, or itself inside the renewal window; arrange CA rotation instead. Old installations whose CA and leaves share the same expiry may need this explicit CA rotation. An externally issued public certificate is left unchanged and must be renewed through its issuing CA/ACME provider. Renewing a self-signed public certificate changes that certificate's identity; clients that explicitly trusted it must update that trust. For routine customer-facing renewal, use certificates issued by an established CA.
+
+Run renewal from a host timer or your certificate-management system before expiry, and pair successful renewal with the activation procedure below. Repeated initialization/checks alone do not perform renewal.
+
+#### Installing customer-facing or externally issued certificates
+
+Use a maintenance window and keep a protected backup of the previous matching files.
+
+1. Obtain the replacement from your ACME/PKI provider. Install the customer-facing leaf and intermediate chain in `tls/public/fullchain.pem` and its matching unencrypted private key in `tls/public/privkey.pem`. Ensure its SANs cover the hostname customers use. The generator's self-signed default is only a bootstrap option.
+2. For internal leaf renewal under the **same CA**, replace the affected `.crt`/`.key` pair without changing `tls/internal/ca.crt`. The API certificate needs server-authentication usage and SANs for `hushfilter-api`, `localhost` (used by the health check), and any additional names in `HUSHFILTER_INTERNAL_SERVER_NAMES`. Both nginx and health-check certificates need client-authentication usage. PEM chains should put the leaf first; provide required intermediates and the appropriate CA trust bundle.
+3. Install regular files with restricted private-key permissions. If your ACME client uses symlinks, copy the dereferenced certificate/key into this layout as part of its deploy hook. Avoid exposing an entire ACME account/key directory to the containers.
+4. Run the read-only check above. If valid certificates are intentionally within the warning window, the check still returns 1; renew them or explicitly resolve that warning before considering the refresh complete.
+5. Activate the replacement using the following procedure.
+
+#### Activating replacements and reloads
+
+The supplied Compose configuration uses **individual bind-mounted files**. The generator writes certificates atomically, and external tools commonly replace files or symlinks in the same way. Existing mounts can continue referencing the old files, so a process reload or container restart alone is not a reliable refresh. **Force-recreate the affected containers to remount the files.** Uvicorn must restart to load its TLS context; recreating nginx also refreshes its upstream API address after API recreation.
+
+This sequence refreshes all TLS files and the API's monitoring copies, including after a public-only certificate replacement. Expect a brief interruption on this single-instance deployment:
+
+```bash
+# Validate the files on the host through the provisioning service first.
+docker compose run --rm tls-cert-init python scripts/ensure_tls_certs.py \
+  --tls-dir /app/tls --check-only
+
+# Stop here if validation failed. Load the new API/health-check certificates first.
+docker compose up -d --no-deps --force-recreate --wait --wait-timeout 120 hushfilter-api
+
+# Then refresh nginx's customer-facing/client certificates and upstream address.
+docker compose up -d --no-deps --force-recreate nginx
+docker compose exec nginx nginx -t
+docker compose ps
+```
+
+Afterward, check the TLS certificate dates in Alerts, verify `https://<your-host>/health` using a client that trusts the public certificate's issuer, and confirm the certificate presented externally is the replacement. If validation or startup fails, restore the previous matching files (including the matching CA for a CA rotation), then repeat the recreation sequence.
+
+For deployments using a different mount layout where new certificate contents are visible in nginx, `nginx -t` followed by `nginx -s reload` reloads configuration/certificates gracefully. That does **not** refresh Uvicorn's TLS context or replace stale file bind mounts in this Compose setup. See [nginx reload behavior](https://nginx.org/en/docs/control.html) and [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/).
+
+#### Explicit CA rotation
+
+Routine server/client renewal should keep the CA stable. When the CA itself is expiring or must be replaced, coordinate a trust change: stop nginx and the API, obtain the new CA trust bundle and **all three** matching internal server/client pairs, replace the internal files as a set, validate, and run the recreation sequence above. Update any other clients that trust this CA. Archive/remove any obsolete local signing key; do not leave an old key paired with a new CA certificate.
+
+For a locally generated bootstrap CA, generate a fresh set in a separate empty staging directory, for example `uv run python scripts/ensure_tls_certs.py --tls-dir /secure/staged-tls`, then install only that staged `internal/` set during the maintenance window. Keep the customer-facing pair unchanged. Do not delete the live `tls` tree to renew a server certificate. The tool deliberately does not automate CA rotation or a zero-downtime trust overlap.
+
+### Optional explicit DNS
+
+Docker normally supplies working DNS without configuration. If name resolution fails inside `hushfilter-api`, uncomment the `dns` block under that service in `docker-compose.yml` and use resolvers reachable from the container:
+
+```yaml
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+```
+
+The example uses public resolvers; use your organization's DNS servers if SMTP or other required names are private. Recreate the service after changing Compose settings. Explicit DNS should not normally be necessary, but a host-local resolver stub, VPN/split-DNS configuration, or host firewall/DNS policy can make the host's DNS path unavailable to containers. A loopback resolver such as `127.0.0.1` inside a container refers to that container, not the host. This setting addresses resolution; it does not bypass outbound firewall restrictions. See [Docker DNS behavior](https://docs.docker.com/engine/network/#dns-services).
 
 ## Diagnostics and scheduled retries
 
@@ -246,6 +361,7 @@ username\tpassword\tTrue/False\tmatch_count
 - `GET /alerts/settings`
 - `PUT /alerts/settings`
 - `POST /alerts/test`
+- `GET /alerts/certificates`
 - `GET /health`
 - `GET /stats`
 - `GET /check`

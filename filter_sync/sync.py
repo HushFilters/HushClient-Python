@@ -185,41 +185,48 @@ def sync_filters(
     downloaded_zip_paths: list[Path] = []
 
     archive_count = len(manifest.current_filter_zips)
+    # Each archive has a local-check step and an optional download step. Keep
+    # their progress separate so a failed reuse check cannot rewind the bar.
+    total_steps = 2 * archive_count
     for archive_index, entry in enumerate(manifest.current_filter_zips):
         label = f"Archive {archive_index + 1}/{archive_count}: {entry.path.name}"
-        report("download", archive_index, archive_count, f"Checking local filters — {label}")
+        check_step = 2 * archive_index
+        report("download", check_step, total_steps, f"Checking local filters — {label}")
         local_zip_path = _safe_local_path(filters_dir, entry.path)
         remote_object_key = f"{REMOTE_FILTERS_PREFIX}/{entry.path.as_posix()}"
 
-        if _location_filters_match_remote_manifest(
-            downloader=active_downloader,
-            local_zip_path=local_zip_path,
-            zip_manifest_path=entry.path,
-        ):
+        with segment("download", check_step, total_steps, label):
+            local_filters_match = _location_filters_match_remote_manifest(
+                downloader=active_downloader,
+                local_zip_path=local_zip_path,
+                zip_manifest_path=entry.path,
+            )
+        if local_filters_match:
             logger.info(
                 "All filter md5s matched for %s; skipping zip re-download",
                 local_zip_path,
             )
             verified_existing.append(local_zip_path)
-            report("download", archive_index + 1, archive_count, f"Already current — {label}")
+            report("download", check_step + 2, total_steps, f"Already current — {label}")
             continue
 
         existed_before_download = local_zip_path.exists()
-        with segment("download", archive_index, archive_count, label):
+        report("download", check_step + 1, total_steps, f"Downloading archive — {label}")
+        with segment("download", check_step + 1, total_steps, label):
             _download_verified_file(
                 downloader=active_downloader,
                 remote_object_key=remote_object_key,
                 destination=local_zip_path,
                 expected_md5=entry.md5,
             )
-        report("download", archive_index + 1, archive_count, label)
+        report("download", check_step + 2, total_steps, label)
         if existed_before_download:
             redownloaded.append(local_zip_path)
         else:
             downloaded.append(local_zip_path)
         downloaded_zip_paths.append(local_zip_path)
 
-    report("download", archive_count, archive_count, status="complete")
+    report("download", total_steps, total_steps, status="complete")
     logger.info("starting filter md5 verification")
     count = len(downloaded_zip_paths)
     for index, zip_path in enumerate(downloaded_zip_paths):
@@ -461,6 +468,7 @@ def _location_filters_match_remote_manifest(
 
     location_dir = local_zip_path.parent
     total_filters = len(upload_manifest.filter_files)
+    report("download", 0, total_filters, f"Checking local filters: 0/{total_filters} verified")
     for completed_checks, entry in enumerate(upload_manifest.filter_files, start=1):
         target_path = _resolve_filter_output_path(location_dir, entry.path)
         if not target_path.exists():
@@ -486,6 +494,8 @@ def _location_filters_match_remote_manifest(
                 reason="local_filter_md5_mismatch",
             )
             return False
+        report("download", completed_checks, total_filters,
+               f"Checking local filters: {completed_checks}/{total_filters} verified")
         _log_local_filter_verification_progress(
             zip_path=local_zip_path,
             completed_checks=completed_checks,

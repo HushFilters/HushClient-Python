@@ -15,14 +15,17 @@ services:
     volumes:
       - ./tls:/app/tls:rw
     restart: "no"
+    healthcheck:
+      disable: true
 
   hushfilter-api:
     build:
       context: .
       dockerfile: Dockerfile
+    # Optional: use DNS servers reachable from this container (see README).
     # dns:
-      # - 1.1.1.1
-      # - 1.0.0.1
+    #   - 1.1.1.1
+    #   - 1.0.0.1
     depends_on:
       tls-cert-init:
         condition: service_completed_successfully
@@ -36,13 +39,57 @@ services:
       # Set HUSHFILTER_TEST_MODE=1 to enable test mode (uses test_manifest.json)
       # - HUSHFILTER_TEST_MODE=${HUSHFILTER_TEST_MODE:-0}
       - PYTHONUNBUFFERED=1
+      - HUSHCLIENT_TLS_MONITOR=${HUSHCLIENT_TLS_MONITOR:-1}
+      - HUSHCLIENT_TLS_DIR=/app/tls
     volumes:
       # Mount filters directory for live updates
       - ./logs:/app/logs:rw
       - ./filters:/app/filters:rw
       - ./manifest.json:/app/manifest.json:rw
       - ./test_manifest.json:/app/test_manifest.json:ro
-      - ./tls:/app/tls:ro
+      # Only API/health-check keys; other services’ public certs are for expiry monitoring.
+      - type: bind
+        source: ./tls/internal/ca.crt
+        target: /app/tls/internal/ca.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/hushfilter-api.crt
+        target: /app/tls/internal/hushfilter-api.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/hushfilter-api.key
+        target: /app/tls/internal/hushfilter-api.key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/healthcheck.crt
+        target: /app/tls/internal/healthcheck.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/healthcheck.key
+        target: /app/tls/internal/healthcheck.key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/public/fullchain.pem
+        target: /app/tls/public/fullchain.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/nginx-client.crt
+        target: /app/tls/internal/nginx-client.crt
+        read_only: true
+        bind:
+          create_host_path: false
     ulimits:
       nofile:
         soft: 65535
@@ -54,7 +101,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import requests; response = requests.get('https://localhost:8443/health', cert=('/app/tls/internal/nginx-client.crt', '/app/tls/internal/nginx-client.key'), verify='/app/tls/internal/ca.crt'); response.raise_for_status()",
+          "import requests; response = requests.get('https://localhost:8443/health', cert=('/app/tls/internal/healthcheck.crt', '/app/tls/internal/healthcheck.key'), verify='/app/tls/internal/ca.crt', timeout=5); response.raise_for_status()",
         ]
       interval: 30s
       timeout: 10s
@@ -73,5 +120,35 @@ services:
       - "443:443"
     volumes:
       - ./nginx/conf.d/hushfilter.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./tls:/etc/hushfilter/tls:ro
+      # Only nginx’s public-facing and mTLS client keys; never the CA signing key.
+      - type: bind
+        source: ./tls/public/fullchain.pem
+        target: /etc/hushfilter/tls/public/fullchain.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/public/privkey.pem
+        target: /etc/hushfilter/tls/public/privkey.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/ca.crt
+        target: /etc/hushfilter/tls/internal/ca.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/nginx-client.crt
+        target: /etc/hushfilter/tls/internal/nginx-client.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./tls/internal/nginx-client.key
+        target: /etc/hushfilter/tls/internal/nginx-client.key
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped

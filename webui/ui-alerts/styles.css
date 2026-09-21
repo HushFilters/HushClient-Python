@@ -15,3 +15,6 @@ select option { background: #14221d; color: #fff; }
 .delivery-attempt { border: 1px solid var(--border-soft); border-radius: 12px; padding: 16px; overflow-wrap: anywhere; }
 .delivery-attempt p { margin-bottom: 0; }
 @media (max-width: 760px) { .alert-grid, .alert-categories { grid-template-columns: 1fr; } #alert-fields { padding: 16px; } }
+
+#certificate-list { display: grid; gap: 12px; margin-bottom: 20px; }
+#refresh-certificates { width: auto; }

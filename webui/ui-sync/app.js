@@ -412,11 +412,20 @@ async function waitForOperationCompletion(expectedOperation) {
   }
 }
 
+function scrollToProgress() {
+  const progress = document.getElementById("sync-progress-section");
+  window.scrollTo({
+    top: window.scrollY + progress.getBoundingClientRect().top - 16,
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+  });
+}
+
 async function runOperation({ endpoint, inProgress, success, failure, onSuccess }) {
   localOperationRunning = true;
   setButtonsDisabled(true);
   setStatus(inProgress);
   document.getElementById("sync-output").textContent = `Starting ${inProgress.toLowerCase()}`;
+  scrollToProgress();
   startLiveLogPolling();
 
   try {
@@ -452,6 +461,7 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
   setButtonsDisabled(true);
   setStatus(inProgress);
   document.getElementById("sync-output").textContent = `Starting ${inProgress.toLowerCase()}`;
+  scrollToProgress();
 
   try {
     const response = await fetch(endpoint, {

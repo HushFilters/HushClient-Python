@@ -1,5 +1,6 @@
 import hashlib
 import json
+from importlib import import_module
 
 import pytest
 
@@ -94,3 +95,80 @@ def test_failure_after_verification_does_not_mark_unstarted_reload_failed():
     phases = {p["phase"]: p for p in state.snapshot()["progress"]}
     assert phases["verify"]["status"] == "failed"
     assert phases["reload"]["status"] == "pending"
+
+
+def local_filters_fixture(tmp_path):
+    downloader = downloader_fixture(tmp_path)
+    for location in ("first", "second"):
+        directory = tmp_path / "filters" / location
+        directory.mkdir(parents=True)
+        entries = []
+        for name, content in {"00.hf": b"first filter", "01.hf": b"second filter"}.items():
+            (directory / name).write_bytes(content)
+            entries.append({"path": name, "md5": hashlib.md5(content).hexdigest()})
+        downloader._text_objects[f"filters/{location}/upload_manifest.json"] = json.dumps({"files": entries})
+    return downloader
+
+
+def test_local_verification_publishes_live_progress_before_archive_finishes(tmp_path, monkeypatch):
+    downloader = local_filters_fixture(tmp_path)
+    state = api._SyncOperationLogState()
+    state.start("sync_filters")
+    sync_module = import_module("filter_sync.sync")
+    calculate_md5 = sync_module.calculate_md5
+    live_snapshots = []
+
+    def inspect_progress_while_hashing(path):
+        if path.name == "01.hf":
+            # Inspect the same payload the UI polls, before the second hash
+            # completes. File one must already have advanced this archive.
+            payload = api.SyncStatusResponse(**state.snapshot()).model_dump()
+            assert payload["active"] is True
+            live_snapshots.append(next(p for p in payload["progress"] if p["phase"] == "download"))
+        return calculate_md5(path)
+
+    monkeypatch.setattr(sync_module, "calculate_md5", inspect_progress_while_hashing)
+    with progress.listen(state.update_progress):
+        result = sync_filters(base_dir=tmp_path / "filter_sync", downloader=downloader)
+
+    assert len(live_snapshots) == 2
+    for index, phase in enumerate(live_snapshots):
+        assert phase["status"] == "running"
+        assert index / 2 < phase["completed"] / phase["total"] < (index + 1) / 2
+        assert f"Archive {index + 1}/2" in phase["detail"]
+        assert "1/2 verified" in phase["detail"]
+    assert len(result.verified_existing) == 2
+    assert downloader.file_requests == []
+    phases = {p["phase"]: p for p in state.snapshot()["progress"]}
+    assert phases["download"]["status"] == "complete"
+    assert phases["download"]["completed"] == phases["download"]["total"]
+    assert phases["extract"]["status"] == phases["verify"]["status"] == "skipped"
+
+
+@pytest.mark.parametrize("unusable", ["missing", "mismatch"])
+def test_local_verification_fallback_keeps_download_progress_moving_forward(tmp_path, unusable):
+    downloader = local_filters_fixture(tmp_path)
+    local_file = tmp_path / "filters" / "first" / "01.hf"
+    if unusable == "missing":
+        local_file.unlink()
+    else:
+        local_file.write_bytes(b"corrupted filter")
+
+    download_file = downloader.download_file
+    def download_with_progress(key, destination):
+        progress.report("download", 0, 2, "Downloading archive")
+        progress.report("download", 1, 2, "Downloading archive")
+        download_file(key, destination)
+        progress.report("download", 2, 2, "Downloading archive")
+    downloader.download_file = download_with_progress
+    updates = []
+    with progress.listen(lambda *args: updates.append(args)):
+        result = sync_filters(base_dir=tmp_path / "filter_sync", downloader=downloader)
+
+    download_updates = [update for update in updates if update[0] == "download"]
+    fractions = [completed / total for _, completed, total, *_ in download_updates]
+    assert fractions == sorted(fractions)
+    assert fractions[-1] == 1
+    assert any("1/2 verified" in update[3] for update in download_updates)
+    assert len(result.downloaded) == len(result.verified_existing) == 1
+    assert local_file.read_bytes() == b"second filter"

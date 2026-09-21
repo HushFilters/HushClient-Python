@@ -36,7 +36,7 @@ ENV PYTHONUNBUFFERED=1
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; response = requests.get('https://localhost:8443/health', cert=('/app/tls/internal/nginx-client.crt', '/app/tls/internal/nginx-client.key'), verify='/app/tls/internal/ca.crt'); response.raise_for_status()" || exit 1
+    CMD python -c "import requests; response = requests.get('https://localhost:8443/health', cert=('/app/tls/internal/healthcheck.crt', '/app/tls/internal/healthcheck.key'), verify='/app/tls/internal/ca.crt', timeout=5); response.raise_for_status()" || exit 1
 
 # Run the API with internal mTLS. nginx verifies this server certificate and
 # Uvicorn requires nginx to present a client certificate signed by the same CA.

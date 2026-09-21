@@ -23,7 +23,7 @@ async function request(url, init = {}) {
   return payload;
 }
 
-const labels = { sync_failure: 'Sync failure', filter_failure: 'Filter failure', no_filters: 'No filters loaded', service_error: 'Service error', test: 'Test email' };
+const labels = { sync_failure: 'Sync failure', filter_failure: 'Filter failure', no_filters: 'No filters loaded', service_error: 'Service error', certificate_expiry: 'TLS certificate issue', test: 'Test email' };
 function renderHistory(history) {
   const container = document.getElementById('alert-history');
   container.replaceChildren();
@@ -43,7 +43,7 @@ function renderHistory(history) {
 function renderSettings(payload) {
   const settings = payload.settings;
   document.getElementById('enabled').checked = settings.enabled;
-  for (const name of ['smtp_host', 'smtp_port', 'security', 'username', 'sender', 'cooldown_minutes']) {
+  for (const name of ['smtp_host', 'smtp_port', 'security', 'username', 'sender', 'cooldown_minutes', 'certificate_warning_days']) {
     document.getElementById(name).value = settings[name];
   }
   document.getElementById('recipients').value = settings.recipients.join('\n');
@@ -93,6 +93,7 @@ form.addEventListener('submit', async event => {
     recipients: document.getElementById('recipients').value.split(/[,;\n]+/).map(value => value.trim()).filter(Boolean),
     events: eventInputs.filter(input => input.checked).map(input => input.value),
     cooldown_minutes: Number(document.getElementById('cooldown_minutes').value),
+    certificate_warning_days: Number(document.getElementById('certificate_warning_days').value),
   };
   busy = true;
   fields.disabled = true;
@@ -100,6 +101,7 @@ form.addEventListener('submit', async event => {
   try {
     const payload = await request('/alerts/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
     renderSettings(payload);
+    void refreshCertificates();
     message(`Settings saved. Automatic alerts are ${payload.settings.enabled ? 'enabled' : 'disabled'}.`);
   } catch (error) { message(error.message, true); }
   finally { fields.disabled = false; busy = false; }
@@ -126,3 +128,32 @@ async function refreshHistory() {
 document.getElementById('reload-alerts').addEventListener('click', loadSettings);
 void loadSettings();
 window.setInterval(refreshHistory, 5000);
+
+async function refreshCertificates() {
+  const button = document.getElementById('refresh-certificates');
+  const status = document.getElementById('certificate-status');
+  const container = document.getElementById('certificate-list');
+  button.disabled = true;
+  try {
+    const payload = await request('/alerts/certificates');
+    container.replaceChildren();
+    status.textContent = payload.enabled
+      ? `Checked ${new Date(payload.checked_at).toLocaleString()}. Warning window: ${payload.warning_days} days.`
+      : 'Certificate monitoring is disabled for this deployment.';
+    for (const cert of payload.certificates) {
+      const item = document.createElement('article');
+      item.className = 'delivery-attempt';
+      const heading = document.createElement('strong');
+      heading.textContent = `${cert.name}: ${cert.status.replaceAll('_', ' ')}`;
+      const detail = document.createElement('p');
+      detail.textContent = cert.expires_at
+        ? `${cert.file} · Expires ${new Date(cert.expires_at).toLocaleString()} · ${cert.days_remaining} days remaining`
+        : `${cert.file} · File is missing, unreadable, or invalid.`;
+      item.append(heading, detail);
+      container.appendChild(item);
+    }
+  } catch (error) { status.textContent = `Could not check certificates: ${error.message}`; }
+  finally { button.disabled = false; }
+}
+document.getElementById('refresh-certificates').addEventListener('click', refreshCertificates);
+void refreshCertificates();

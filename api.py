@@ -28,6 +28,7 @@ from filter_sync.r2_client import R2ClientError
 from filter_sync.sync import SyncError, sync_filters, _machine_id_from_mac
 from diagnostic_logs import LogSettings, install_logging, uninstall_logging
 from alerts import AlertManager, AlertSettings
+from certificates import alert_certificate_issues, inspect_certificates
 from filter_sync import progress as sync_progress
 from fastapi.openapi.docs import get_swagger_ui_html
 from helpers.generate_manifest import generate_manifest
@@ -40,6 +41,7 @@ logger = logging.getLogger("uvicorn.error")
 sync_logger = logging.getLogger("hushclient.sync")
 diagnostic_logs = None
 alert_manager: AlertManager | None = None
+CERTIFICATE_CHECK_INTERVAL_SECONDS = 3600
 AUTO_UPDATE_RETRY_SECONDS = 300
 AUTO_UPDATE_RETRY_WINDOW_SECONDS = 3600
 _auto_update_retry_at: str | None = None
@@ -176,6 +178,28 @@ def _check_loaded_filters() -> None:
         _notify_alert("filter_failure", "Some configured filters could not be loaded. Credential checks have incomplete breach data.")
 
 
+def _certificate_monitor_enabled() -> bool:
+    return os.getenv("HUSHCLIENT_TLS_MONITOR", "0").strip() == "1"
+
+
+def _certificate_status(notify: bool = False) -> dict:
+    warning_days = _alerts().snapshot()["settings"]["certificate_warning_days"]
+    if not _certificate_monitor_enabled():
+        return {"enabled": False, "warning_days": warning_days, "checked_at": None, "certificates": []}
+    directory = Path(os.getenv("HUSHCLIENT_TLS_DIR", "tls"))
+    result = alert_certificate_issues(_alerts(), directory) if notify else inspect_certificates(directory, warning_days)
+    return {"enabled": True, **result}
+
+
+async def _certificate_monitor_loop() -> None:
+    while True:
+        await asyncio.sleep(CERTIFICATE_CHECK_INTERVAL_SECONDS)
+        try:
+            await asyncio.to_thread(_certificate_status, True)
+        except Exception:
+            logger.exception("Certificate expiry check failed")
+
+
 def _is_test_mode_enabled() -> bool:
     return os.getenv("HUSHFILTER_TEST_MODE", "").strip() == "1"
 
@@ -204,6 +228,7 @@ async def lifespan(app: FastAPI):
     global filter_manager
     global _auto_update_wake_event
     auto_update_task: asyncio.Task[None] | None = None
+    certificate_task: asyncio.Task[None] | None = None
     
     global diagnostic_logs, alert_manager
     diagnostic_logs, attached = install_logging()
@@ -239,6 +264,9 @@ async def lifespan(app: FastAPI):
     sys.excepthook = process_error
     loop.set_exception_handler(task_error)
     try:
+        if _certificate_monitor_enabled():
+            await asyncio.to_thread(_certificate_status, True)
+            certificate_task = asyncio.create_task(_certificate_monitor_loop())
         manifest_path = _current_filter_configuration()
         try:
             filter_manager = FilterManager(manifest_path=manifest_path)
@@ -253,6 +281,10 @@ async def lifespan(app: FastAPI):
         auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
         yield
     finally:
+        if certificate_task is not None:
+            certificate_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await certificate_task
         if auto_update_task is not None:
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -638,6 +670,15 @@ async def configure_alert_settings(settings: AlertSettings):
     except OSError:
         raise HTTPException(status_code=500, detail="Could not save alert settings") from None
     _check_loaded_filters()
+    if _certificate_monitor_enabled():
+        await run_in_threadpool(_certificate_status, True)
+    return JSONResponse(_with_test_mode(result), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/alerts/certificates", tags=["Alerts"])
+async def certificate_status():
+    """Inspect the mounted public certificates and chains, without reading any private keys."""
+    result = await run_in_threadpool(_certificate_status)
     return JSONResponse(_with_test_mode(result), headers={"Cache-Control": "no-store"})
 
 
