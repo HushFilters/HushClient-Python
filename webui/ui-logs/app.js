@@ -19,7 +19,10 @@ async function request(url, init = {}) {
 }
 
 let loadedSettings = false;
+let refreshing = false;
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   const button = document.getElementById('refresh-logs');
   button.disabled = true;
   try {
@@ -39,6 +42,7 @@ async function refresh() {
     logStatus.textContent = `Could not load logs: ${error.message}`;
   } finally {
     button.disabled = false;
+    refreshing = false;
   }
 }
 
@@ -74,3 +78,10 @@ document.getElementById('clear-logs').addEventListener('click', async () => {
   }
 });
 void refresh();
+
+window.setInterval(() => {
+  if (document.getElementById('log-window').open && !document.hidden) void refresh();
+}, 2000);
+document.getElementById('log-window').addEventListener('toggle', event => {
+  if (event.target.open) void refresh();
+});

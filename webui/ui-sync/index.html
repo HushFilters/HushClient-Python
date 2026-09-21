@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
-  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260920a">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260920b">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260920b">
 </head>
 <body>
   <main class="workspace-shell">
@@ -29,6 +29,8 @@
           <a class="workspace-nav-link" href="/ui-check/">Credential Check</a>
           <a class="workspace-nav-link active" href="/ui-sync/">Filter Sync</a>
           <a class="workspace-nav-link" href="/ui-logs/">Logs</a>
+          <a class="workspace-nav-link" href="/ui-alerts/">Alerts</a>
+          <a class="workspace-nav-link" href="/docs">Docs</a>
         </nav>
       </header>
 
@@ -141,9 +143,12 @@
         </section>
 
         <section class="metrics-grid sync-metrics-grid">
-          <article class="surface-card metric-card">
-            <p class="metric-label">Downloaded</p>
-            <p id="downloaded-count" class="metric-value">0</p>
+          <article class="surface-card progress-card">
+            <div class="surface-card__inner">
+              <h2 class="sync-section-heading">Progress</h2>
+              <p id="progress-summary" class="status" role="status">No operation started yet.</p>
+              <div id="sync-progress" class="sync-progress" aria-label="Sync phase progress"></div>
+            </div>
           </article>
           <article class="surface-card metric-card">
             <p class="metric-label">Loaded Filters</p>
@@ -153,9 +158,11 @@
 
         <section class="surface-card sync-output-card">
           <div class="surface-card__inner">
-            <p class="section-eyebrow">Operational Log</p>
-            <h2 class="sync-section-heading">Sync Output</h2>
-            <pre id="sync-output" class="mono-surface">-</pre>
+            <details id="sync-log-window" class="operational-window" open>
+              <summary>Operational Log · Sync Output</summary>
+              <label class="follow-log"><input id="sync-autoscroll" type="checkbox" checked> Auto-scroll to latest entries</label>
+              <pre id="sync-output" class="mono-surface" tabindex="0" aria-label="Sync output">-</pre>
+            </details>
           </div>
         </section>
         <section class="surface-card auto-update-card">
@@ -170,9 +177,11 @@
           </div>
         </section>
       </div>
+      {{WORKSPACE_FOOTER}}
     </section>
   </main>
 
-  <script src="/ui-sync/app.js?v=20260920a" defer></script>
+  <script src="/ui-assets/log-window.js?v=20260920b" defer></script>
+  <script src="/ui-sync/app.js?v=20260920b" defer></script>
 </body>
 </html>

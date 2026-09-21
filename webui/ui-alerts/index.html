@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HushFilter Alerts</title>
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260920b">
+  <link rel="stylesheet" href="/ui-alerts/styles.css?v=20260920b">
+</head>
+<body>
+  <main class="workspace-shell"><section class="workspace-panel">
+    {{TEST_MODE_BANNER}}
+    <header class="workspace-header">
+      <div class="workspace-brand">
+        <img class="workspace-brand__logo" src="/ui-assets/images/nWebbed_PrimaryTransparent.svg" alt="nWebbed">
+        <div class="workspace-brand__copy">
+          <p class="workspace-brand__eyebrow">HushFilter Operations</p>
+          <p class="workspace-brand__caption">Email notifications for critical operational issues.</p>
+        </div>
+      </div>
+      <nav class="workspace-nav" aria-label="Tool navigation">
+        <a class="workspace-nav-link" href="/ui-check/">Credential Check</a>
+        <a class="workspace-nav-link" href="/ui-sync/">Filter Sync</a>
+        <a class="workspace-nav-link" href="/ui-logs/">Logs</a>
+        <a class="workspace-nav-link active" href="/ui-alerts/" aria-current="page">Alerts</a>
+        <a class="workspace-nav-link" href="/docs">Docs</a>
+      </nav>
+    </header>
+    <div class="workspace-body">
+      <section class="surface-card"><div class="surface-card__inner">
+        <p class="section-eyebrow">Notifications</p>
+        <h1 class="section-title">Email Alerts</h1>
+        <p class="section-copy">Choose which issues send an email, then configure your SMTP server. Alerts run on the server even when this page is closed.</p>
+        <form id="alert-form">
+          <fieldset id="alert-fields" disabled>
+            <legend>SMTP and alert settings</legend>
+            <label class="alert-choice"><input id="enabled" type="checkbox"> Enable automatic email alerts</label>
+            <div class="alert-grid">
+              <label class="field-stack"><span class="field-label">SMTP host</span><input id="smtp_host" class="app-input" type="text" maxlength="253" placeholder="smtp.example.com" autocomplete="off"></label>
+              <label class="field-stack"><span class="field-label">SMTP port</span><input id="smtp_port" class="app-input" type="number" min="1" max="65535" value="587" required></label>
+              <label class="field-stack"><span class="field-label">Connection security</span><select id="security" class="app-input"><option value="starttls">STARTTLS (usually port 587)</option><option value="ssl">TLS from connection (usually port 465)</option><option value="none">No TLS — trusted relay only (usually port 25)</option></select></label>
+              <label class="field-stack"><span class="field-label">SMTP username</span><input id="username" class="app-input" type="text" maxlength="320" autocomplete="off"><span class="field-help">Leave username and password empty for an unauthenticated relay.</span></label>
+              <label class="field-stack"><span class="field-label">SMTP password</span><input id="password" class="app-input" type="password" maxlength="4096" autocomplete="new-password" aria-describedby="password-help"><span id="password-help" class="field-help">Leave blank to keep the saved password.</span></label>
+              <label class="alert-choice"><input id="clear-password" type="checkbox"> Clear saved password</label>
+              <label class="field-stack"><span class="field-label">From email address</span><input id="sender" class="app-input" type="email" maxlength="254" placeholder="hush@example.com"></label>
+              <label class="field-stack"><span class="field-label">Recipient email addresses</span><textarea id="recipients" class="app-input" rows="3" placeholder="ops@example.com, admin@example.com"></textarea><span class="field-help">Separate addresses with commas, semicolons, or new lines.</span></label>
+            </div>
+            <h2 class="alert-heading">Alert categories</h2>
+            <div class="alert-categories">
+              <label class="alert-choice"><input name="event" value="sync_failure" type="checkbox"><span><strong>Sync failures</strong><small>Manual and scheduled downloads, remote manifests, extraction, and checksum failures.</small></span></label>
+              <label class="alert-choice"><input name="event" value="filter_failure" type="checkbox"><span><strong>Filter loading and manifest failures</strong><small>Startup loading, local manifest generation, and live reload failures.</small></span></label>
+              <label class="alert-choice"><input name="event" value="no_filters" type="checkbox"><span><strong>No filters loaded</strong><small>Detected at startup, reload, or when you enable this alert.</small></span></label>
+              <label class="alert-choice"><input name="event" value="service_error" type="checkbox"><span><strong>Critical service errors</strong><small>Unhandled request/background exceptions and other HTTP 5xx responses.</small></span></label>
+            </div>
+            <label class="field-stack cooldown-field"><span class="field-label">Repeat-alert cooldown (minutes)</span><input id="cooldown_minutes" class="app-input" type="number" min="1" max="1440" value="15" required><span class="field-help">At most one automatic email attempt per category in this interval, including scheduled retries.</span></label>
+            <div class="alert-actions">
+              <button id="save-alerts" class="action-button" type="submit">Save settings</button>
+              <button id="test-alert" class="action-button action-button--secondary" type="button">Send test email</button>
+            </div>
+            <p class="field-help">Test email uses your saved settings and works while automatic alerts are disabled. Save changes before testing.</p>
+          </fieldset>
+        </form>
+        <p id="alert-status" class="status" role="status">Loading settings…</p>
+        <button id="reload-alerts" class="action-button action-button--secondary" type="button">Reload saved settings</button>
+        <p class="section-copy">Email alerts require the client and SMTP connection to be available. Use external monitoring for host outages or a stopped container.</p>
+      </div></section>
+      <section class="surface-card"><div class="surface-card__inner">
+        <h2 class="alert-heading">Recent email delivery attempts</h2>
+        <p class="section-copy">Up to 20 attempts from this process. SMTP acceptance does not guarantee inbox delivery.</p>
+        <div id="alert-history">No delivery attempts yet.</div>
+      </div></section>
+    </div>
+    {{WORKSPACE_FOOTER}}
+  </section></main>
+  <script src="/ui-alerts/app.js?v=20260920b" defer></script>
+</body>
+</html>

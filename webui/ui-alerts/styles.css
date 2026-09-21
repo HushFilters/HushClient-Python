@@ -1,0 +1,17 @@
+.workspace-body { display: grid; gap: 24px; }
+#alert-fields { border: 1px solid var(--border-soft); border-radius: 16px; margin: 24px 0; padding: 24px; min-width: 0; }
+.alert-grid, .alert-categories { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin: 24px 0; }
+.alert-grid { align-items: start; }
+.alert-choice { display: flex; align-items: center; gap: 12px; }
+.alert-choice input { width: 18px; height: 18px; flex-shrink: 0; }
+.alert-choice span { display: grid; gap: 8px; }
+.alert-choice small { color: var(--text-soft); line-height: 1.6; }
+.alert-heading { font-size: 1.1rem; margin-top: 24px; }
+.alert-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0 12px; }
+.alert-actions .action-button, #reload-alerts { width: auto; }
+.cooldown-field { max-width: 32rem; }
+select option { background: #14221d; color: #fff; }
+#alert-history { display: grid; gap: 12px; }
+.delivery-attempt { border: 1px solid var(--border-soft); border-radius: 12px; padding: 16px; overflow-wrap: anywhere; }
+.delivery-attempt p { margin-bottom: 0; }
+@media (max-width: 760px) { .alert-grid, .alert-categories { grid-template-columns: 1fr; } #alert-fields { padding: 16px; } }

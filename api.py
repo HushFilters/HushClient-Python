@@ -27,6 +27,9 @@ from core.filter_core import FilterManager
 from filter_sync.r2_client import R2ClientError
 from filter_sync.sync import SyncError, sync_filters, _machine_id_from_mac
 from diagnostic_logs import LogSettings, install_logging, uninstall_logging
+from alerts import AlertManager, AlertSettings
+from filter_sync import progress as sync_progress
+from fastapi.openapi.docs import get_swagger_ui_html
 from helpers.generate_manifest import generate_manifest
 
 
@@ -36,6 +39,7 @@ operation_lock = threading.Lock()
 logger = logging.getLogger("uvicorn.error")
 sync_logger = logging.getLogger("hushclient.sync")
 diagnostic_logs = None
+alert_manager: AlertManager | None = None
 AUTO_UPDATE_RETRY_SECONDS = 300
 AUTO_UPDATE_RETRY_WINDOW_SECONDS = 3600
 _auto_update_retry_at: str | None = None
@@ -60,6 +64,8 @@ class _SyncOperationLogState:
         self._success: bool | None = None
         self._detail: str | None = None
         self._result: dict[str, object] = {}
+        self._progress: dict[str, dict] = {}
+        self._current_phase: str | None = None
 
     def start(self, operation: str) -> None:
         with self._lock:
@@ -69,6 +75,26 @@ class _SyncOperationLogState:
             self._success = None
             self._detail = None
             self._result = {}
+            phases = ["prepare", "download", "extract", "verify"]
+            if operation in {"sync_apply", "auto_sync_apply"}:
+                phases += ["manifest", "reload"]
+            elif operation == "sync_manifest":
+                phases = ["manifest"]
+            elif operation == "sync_reload":
+                phases = ["reload"]
+            self._progress = {
+                phase: {"phase": phase, "status": "pending", "completed": 0,
+                        "total": None, "detail": ""} for phase in phases
+            }
+            self._progress[phases[0]]["status"] = "running"
+            self._current_phase = phases[0]
+
+    def update_progress(self, phase, completed=0, total=None, detail="", status="running") -> None:
+        with self._lock:
+            if self._active and phase in self._progress:
+                self._current_phase = phase
+                self._progress[phase] = {"phase": phase, "status": status,
+                                         "completed": completed, "total": total, "detail": detail}
 
     def append(self, line: str) -> None:
         with self._lock:
@@ -80,6 +106,15 @@ class _SyncOperationLogState:
         with self._lock:
             success = payload.get("success")
             self._success = success if isinstance(success, bool) else None
+            failed_phase = next((p["phase"] for p in self._progress.values() if p["status"] == "running"), None)
+            if success is False and failed_phase is None and self._current_phase:
+                failed_phase = self._current_phase
+                self._progress[failed_phase]["status"] = "failed"
+            for progress in self._progress.values():
+                if success and progress["status"] != "skipped":
+                    progress.update(status="complete", completed=progress["total"] or 1, total=progress["total"] or 1)
+                elif success is False and progress["status"] == "running":
+                    progress["status"] = "failed"
 
             detail = payload.get("detail")
             self._detail = detail if isinstance(detail, str) or detail is None else str(detail)
@@ -94,6 +129,11 @@ class _SyncOperationLogState:
                 if key not in {"success", "detail", "logs", "test_mode"}
             }
 
+        if payload.get("success") is False:
+            event = "filter_failure" if self._operation in {"sync_manifest", "sync_reload"} or failed_phase in {"manifest", "reload"} else "sync_failure"
+            trigger = "Scheduled" if self._operation == "auto_sync_apply" else "Manual"
+            _notify_alert(event, f"{trigger} filter operation failed during {failed_phase or self._operation}.")
+
     def finish(self) -> None:
         with self._lock:
             self._active = False
@@ -107,6 +147,7 @@ class _SyncOperationLogState:
                 "success": self._success,
                 "detail": self._detail,
                 **self._result,
+                "progress": [dict(item) for item in self._progress.values()],
             }
 
 
@@ -119,6 +160,20 @@ class _LiveSyncLogHandler(logging.Handler):
 
 
 sync_operation_logs = _SyncOperationLogState()
+
+
+def _notify_alert(event: str, summary: str) -> None:
+    if alert_manager is not None:
+        alert_manager.notify(event, summary)
+
+
+def _check_loaded_filters() -> None:
+    if filter_manager is None:
+        return
+    if not filter_manager.filters:
+        _notify_alert("no_filters", "The client has no loaded filters. Credential checks have no breach data to search.")
+    elif len(filter_manager.filters) < getattr(filter_manager, "_requested_filter_count", 0):
+        _notify_alert("filter_failure", "Some configured filters could not be loaded. Credential checks have incomplete breach data.")
 
 
 def _is_test_mode_enabled() -> bool:
@@ -139,7 +194,8 @@ def _render_ui_page(page_name: str) -> HTMLResponse:
             "TEST MODE"
             "</div>"
         )
-    return HTMLResponse(content=html.replace("{{TEST_MODE_BANNER}}", banner_html))
+    footer = Path("webui/assets/footer.html").read_text(encoding="utf-8")
+    return HTMLResponse(content=html.replace("{{TEST_MODE_BANNER}}", banner_html).replace("{{WORKSPACE_FOOTER}}", footer))
 
 
 @asynccontextmanager
@@ -149,23 +205,28 @@ async def lifespan(app: FastAPI):
     global _auto_update_wake_event
     auto_update_task: asyncio.Task[None] | None = None
     
-    global diagnostic_logs
+    global diagnostic_logs, alert_manager
     diagnostic_logs, attached = install_logging()
+    alert_manager = AlertManager(Path(os.getenv("HUSHCLIENT_ALERT_SETTINGS_PATH", "filters/.alerts.json")))
+    alert_manager.start()
     previous_thread_hook = threading.excepthook
     previous_sys_hook = sys.excepthook
     loop = asyncio.get_running_loop()
     previous_loop_handler = loop.get_exception_handler()
 
     def thread_error(args):
+        _notify_alert("service_error", "An unhandled background thread error occurred.")
         logger.error("Unhandled thread error in %s", args.thread.name,
                      exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
         previous_thread_hook(args)
 
     def process_error(exc_type, value, traceback):
+        _notify_alert("service_error", "An unhandled process error occurred.")
         logger.critical("Unhandled process error", exc_info=(exc_type, value, traceback))
         previous_sys_hook(exc_type, value, traceback)
 
     def task_error(active_loop, context):
+        _notify_alert("service_error", "An unhandled asynchronous task error occurred.")
         exc = context.get("exception")
         logger.error("Unhandled asynchronous task error: %s", context.get("message"),
                      exc_info=(type(exc), exc, exc.__traceback__) if exc else None)
@@ -182,7 +243,9 @@ async def lifespan(app: FastAPI):
         try:
             filter_manager = FilterManager(manifest_path=manifest_path)
             logger.info("Loaded %d filters from %s", len(filter_manager.filters), manifest_path)
+            _check_loaded_filters()
         except Exception:
+            _notify_alert("filter_failure", "The client could not load filters during startup.")
             logger.exception("Error loading filters")
             raise
         _load_auto_update_state()
@@ -206,6 +269,8 @@ async def lifespan(app: FastAPI):
             threading.excepthook = previous_thread_hook
             sys.excepthook = previous_sys_hook
             loop.set_exception_handler(previous_loop_handler)
+            await asyncio.to_thread(alert_manager.close)
+            alert_manager = None
             uninstall_logging(diagnostic_logs, attached)
             diagnostic_logs = None
 
@@ -214,7 +279,8 @@ app = FastAPI(
     title="HushFilter API",
     description="Bloom filter based credential membership checking API",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,
 )
 
 
@@ -231,14 +297,18 @@ async def http_exception_handler(_request: Request, exc: StarletteHTTPException)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
     logger.error("Request validation failed: %s (%d errors)", _request.method, len(exc.errors()))
+    errors = exc.errors()
+    if _request.url.path.startswith("/alerts"):
+        errors = [{"loc": error["loc"], "msg": error["msg"], "type": error["type"]} for error in errors]
     return JSONResponse(
         status_code=422,
-        content=_with_test_mode({"detail": exc.errors()}),
+        content=_with_test_mode({"detail": errors}),
     )
 
 
 @app.exception_handler(Exception)
 async def unexpected_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    _notify_alert("service_error", "An unhandled API request error occurred.")
     logger.error("Unhandled request error", exc_info=(type(exc), exc, exc.__traceback__))
     return JSONResponse(
         status_code=500,
@@ -353,8 +423,17 @@ class SyncApplyStartResponse(ApiResponse):
     detail: Optional[str] = None
 
 
+class SyncPhaseProgress(BaseModel):
+    phase: str
+    status: str
+    completed: float = 0
+    total: Optional[float] = None
+    detail: str = ""
+
+
 class SyncStatusResponse(ApiResponse):
     """Response model for live sync status polling."""
+    progress: list[SyncPhaseProgress] = Field(default_factory=list)
     active: bool
     operation: Optional[str] = None
     logs: List[str] = Field(default_factory=list)
@@ -417,6 +496,9 @@ async def root():
             "ui_check": "/ui-check",
             "ui_sync": "/ui-sync",
             "ui_logs": "/ui-logs",
+            "ui_alerts": "/ui-alerts",
+            "alerts": "/alerts/settings",
+            "docs": "/docs",
             "logs": "/logs",
             "health": "/health",
             "stats": "/stats",
@@ -471,6 +553,8 @@ async def log_requests(request: Request, call_next):
         logging.getLogger("hushclient.requests").log(
             logging.ERROR if response.status_code >= 400 else logging.INFO,
             "%s %s -> %d", request.method, route, response.status_code)
+    if response.status_code >= 500 and not route.startswith(("/sync/", "/alerts/")):
+        _notify_alert("service_error", "An API request returned a server error (HTTP 5xx).")
     return response
 
 
@@ -523,7 +607,63 @@ async def download_logs():
                                       "Cache-Control": "no-store"})
 
 
+@app.get("/ui-alerts", tags=["General"])
+async def ui_alerts_redirect():
+    return RedirectResponse(url="/ui-alerts/")
+
+
+@app.get("/ui-alerts/", tags=["General"])
+async def ui_alerts_page():
+    return _render_ui_page("ui-alerts")
+
+
+def _alerts() -> AlertManager:
+    if alert_manager is None:
+        raise HTTPException(status_code=503, detail="Alerts are not initialized")
+    return alert_manager
+
+
+@app.get("/alerts/settings", tags=["Alerts"])
+async def get_alert_settings():
+    return JSONResponse(_with_test_mode(_alerts().snapshot()), headers={"Cache-Control": "no-store"})
+
+
+@app.put("/alerts/settings", tags=["Alerts"])
+async def configure_alert_settings(settings: AlertSettings):
+    """Save SMTP settings. Null/omitted password keeps the saved secret; empty clears it."""
+    try:
+        result = await run_in_threadpool(_alerts().configure, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except OSError:
+        raise HTTPException(status_code=500, detail="Could not save alert settings") from None
+    _check_loaded_filters()
+    return JSONResponse(_with_test_mode(result), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/alerts/test", tags=["Alerts"])
+async def send_test_alert():
+    """Send a test email with saved settings, even when automatic alerts are disabled."""
+    try:
+        result = await run_in_threadpool(_alerts().test_email)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return JSONResponse(_with_test_mode(result), status_code=200 if result["success"] else 502,
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/docs", include_in_schema=False)
+async def docs_page():
+    swagger = get_swagger_ui_html(openapi_url=app.openapi_url, title="HushFilter API - Swagger UI")
+    html = swagger.body.decode("utf-8")
+    header = Path("webui/assets/docs-header.html").read_text(encoding="utf-8")
+    footer = Path("webui/assets/footer.html").read_text(encoding="utf-8")
+    html = html.replace("<body>", "<body>" + header).replace("</body>", footer + "</body>")
+    return HTMLResponse(html)
+
+
 # Static UI
+app.mount("/ui-alerts", StaticFiles(directory="webui/ui-alerts", html=True), name="ui-alerts")
 app.mount("/ui-logs", StaticFiles(directory="webui/ui-logs", html=True), name="ui-logs")
 app.mount("/ui-check", StaticFiles(directory="webui/ui-check", html=True), name="ui-check")
 app.mount("/ui-sync", StaticFiles(directory="webui/ui-sync", html=True), name="ui-sync")
@@ -812,7 +952,9 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
         sync_logger.addHandler(handler)
 
     try:
-        result = sync_filters()
+        sync_operation_logs.update_progress("prepare", detail="Fetching credentials and remote manifest")
+        with sync_progress.listen(sync_operation_logs.update_progress):
+            result = sync_filters()
     except (R2ClientError, SyncError) as exc:
         sync_logger.exception("Filter sync failed")
         capture_handler.flush()
@@ -853,6 +995,7 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
 
 
 def _run_manifest_update_with_logs() -> ManifestUpdateResponse:
+    sync_operation_logs.update_progress("manifest", detail="Generating local manifest")
     log_stream = StringIO()
     stdout_stream = StringIO()
     stderr_stream = StringIO()
@@ -901,7 +1044,8 @@ def _run_manifest_update_with_logs() -> ManifestUpdateResponse:
         filter_count = len(manifest.get("filters", []))
     except Exception:
         sync_logger.exception("Could not read generated manifest")
-        filter_count = 0
+        return ManifestUpdateResponse(success=False, output_file="manifest.json", logs=logs,
+                                      detail="Could not read generated manifest")
 
     return ManifestUpdateResponse(
         success=True,
@@ -935,6 +1079,11 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
             detail=sync_response.detail,
         )
 
+    for phase in ("prepare", "download", "extract", "verify"):
+        current = next((item for item in sync_operation_logs.snapshot()["progress"] if item["phase"] == phase), None)
+        if current and current["status"] not in {"skipped", "complete"}:
+            sync_operation_logs.update_progress(phase, 1, 1, status="complete")
+    sync_operation_logs.update_progress("manifest", detail="Generating local manifest")
     logs.append("INFO step 2/3: manifest update")
     _append_live_sync_log("INFO step 2/3: manifest update")
     manifest_response = _run_manifest_update_with_logs()
@@ -954,6 +1103,8 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
             detail=manifest_response.detail,
         )
 
+    sync_operation_logs.update_progress("manifest", 1, 1, status="complete")
+    sync_operation_logs.update_progress("reload", detail="Loading filters into memory")
     logs.append("INFO step 3/3: reload filters")
     _append_live_sync_log("INFO step 3/3: reload filters")
     reload_response = _run_filter_reload_with_logs()
@@ -1014,6 +1165,7 @@ def _run_sync_apply_background_job() -> None:
 
 def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
     global filter_manager
+    sync_operation_logs.update_progress("reload", detail="Loading filters into memory")
 
     logs: list[str] = []
     try:
@@ -1027,6 +1179,7 @@ def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
             old_manager.close()
             logs.append("INFO closed previous filter mappings")
 
+        _check_loaded_filters()
         stats = new_manager.get_stats()
         return ReloadFiltersResponse(
             success=True,

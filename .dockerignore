@@ -21,3 +21,7 @@ debug_*.py
 .uv/
 
 logs/
+
+# SMTP alert credentials and atomic settings writes
+filters/.alerts.json
+filters/.alerts-*.tmp

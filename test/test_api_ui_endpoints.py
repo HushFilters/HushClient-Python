@@ -79,7 +79,7 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         sync_response = client.get("/ui-sync/")
         assert sync_response.status_code == 200
         assert "sync, update manifest, and reload filters" in sync_response.text
-        assert "/ui-sync/app.js?v=20260920a" in sync_response.text
+        assert "/ui-sync/app.js?v=20260920b" in sync_response.text
         assert "Daily Auto-Update" in sync_response.text
         assert "Recent sync history" in sync_response.text
         assert "sync filters from nWebbed" in sync_response.text

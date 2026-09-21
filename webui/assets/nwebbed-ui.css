@@ -653,3 +653,10 @@ code {
     font-size: clamp(1.35rem, 8vw, 1.9rem);
   }
 }
+
+.workspace-footer { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 1.25rem; padding: 1.5rem; border-top: 1px solid var(--border-soft); color: var(--text-soft); font-size: 0.82rem; }
+.workspace-footer a { color: var(--color-primary-300); text-underline-offset: 4px; }
+.workspace-nav { flex-wrap: wrap; }
+.operational-window summary { cursor: pointer; color: var(--text-primary); font-weight: 600; padding: 0.5rem 0; }
+.follow-log { display: flex; align-items: center; gap: 0.65rem; margin: 1rem 0; font-size: 0.85rem; color: var(--text-soft); }
+.follow-log input { width: 18px; height: 18px; }

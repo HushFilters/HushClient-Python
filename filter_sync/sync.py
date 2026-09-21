@@ -15,6 +15,7 @@ from zipfile import ZipFile
 import requests
 
 from .r2_client import R2Client, R2ClientError, R2Config
+from .progress import report, segment
 
 DEFAULT_BUCKET = "hushfilters"
 REMOTE_FILTERS_PREFIX = "filters"
@@ -165,6 +166,7 @@ def sync_filters(
     filters_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = filters_dir / REMOTE_MANIFEST_NAME
 
+    report("prepare", detail="Fetching credentials and remote manifest")
     active_downloader = downloader or _build_r2_downloader(
         env_path=env_path,
         bucket=bucket,
@@ -175,13 +177,17 @@ def sync_filters(
     manifest_payload = active_downloader.download_text(remote_manifest_key)
     manifest = FilterManifest.from_json(manifest_payload)
     _write_text_atomic(manifest_path, manifest_payload)
+    report("prepare", 1, 1, status="complete")
 
     downloaded: list[Path] = []
     redownloaded: list[Path] = []
     verified_existing: list[Path] = []
     downloaded_zip_paths: list[Path] = []
 
-    for entry in manifest.current_filter_zips:
+    archive_count = len(manifest.current_filter_zips)
+    for archive_index, entry in enumerate(manifest.current_filter_zips):
+        label = f"Archive {archive_index + 1}/{archive_count}: {entry.path.name}"
+        report("download", archive_index, archive_count, f"Checking local filters — {label}")
         local_zip_path = _safe_local_path(filters_dir, entry.path)
         remote_object_key = f"{REMOTE_FILTERS_PREFIX}/{entry.path.as_posix()}"
 
@@ -195,26 +201,43 @@ def sync_filters(
                 local_zip_path,
             )
             verified_existing.append(local_zip_path)
+            report("download", archive_index + 1, archive_count, f"Already current — {label}")
             continue
 
         existed_before_download = local_zip_path.exists()
-        _download_verified_file(
-            downloader=active_downloader,
-            remote_object_key=remote_object_key,
-            destination=local_zip_path,
-            expected_md5=entry.md5,
-        )
+        with segment("download", archive_index, archive_count, label):
+            _download_verified_file(
+                downloader=active_downloader,
+                remote_object_key=remote_object_key,
+                destination=local_zip_path,
+                expected_md5=entry.md5,
+            )
+        report("download", archive_index + 1, archive_count, label)
         if existed_before_download:
             redownloaded.append(local_zip_path)
         else:
             downloaded.append(local_zip_path)
         downloaded_zip_paths.append(local_zip_path)
 
+    report("download", archive_count, archive_count, status="complete")
     logger.info("starting filter md5 verification")
-    for zip_path in downloaded_zip_paths:
-        _extract_zip_archive(zip_path, zip_path.parent)
-        _verify_filters_for_downloaded_zip(manifest=manifest, zip_path=zip_path)
+    count = len(downloaded_zip_paths)
+    for index, zip_path in enumerate(downloaded_zip_paths):
+        label = f"Archive {index + 1}/{count}: {zip_path.name}"
+        report("extract", index, count, label)
+        with segment("extract", index, count, label):
+            _extract_zip_archive(zip_path, zip_path.parent)
+        report("extract", index + 1, count, label,
+               status="complete" if index + 1 == count else "pending")
+        report("verify", index, count, label)
+        with segment("verify", index, count, label):
+            _verify_filters_for_downloaded_zip(manifest=manifest, zip_path=zip_path)
+        report("verify", index + 1, count, label,
+               status="complete" if index + 1 == count else "pending")
         zip_path.unlink()
+    if not count:
+        for phase in ("extract", "verify"):
+            report(phase, detail="Local filters already verified; no archives needed", status="skipped")
     logger.info("finished filter md5 verification")
 
     return SyncResult(
@@ -384,6 +407,7 @@ def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
             with archive.open(member, "r") as source, target_path.open("wb") as destination:
                 shutil.copyfileobj(source, destination)
             extracted_members += 1
+            report("extract", extracted_members, total_members, f"{extracted_members}/{total_members} files extracted")
             _log_local_filter_extraction_progress(
                 zip_path=zip_path,
                 extracted_members=extracted_members,
@@ -490,7 +514,8 @@ def _verify_filters_for_downloaded_zip(
         total_filters,
     )
     successful_checks = 0
-    for entry in expected_files:
+    for checked, entry in enumerate(expected_files, start=1):
+        report("verify", checked - 1, total_filters, f"Checking file {checked}/{total_filters}")
         target_path = _resolve_filter_output_path(location_dir, entry.path)
         if not target_path.exists():
             _log_filter_md5_failure(
@@ -515,6 +540,7 @@ def _verify_filters_for_downloaded_zip(
             )
             continue
         successful_checks += 1
+        report("verify", checked, total_filters, f"{checked}/{total_filters} files checked")
         if not failures:
             _log_local_filter_verification_progress(
                 zip_path=zip_path,

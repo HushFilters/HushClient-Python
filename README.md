@@ -25,6 +25,41 @@ The CLI and API accept only:
 
 Add the issued key to `NWEBBED_API_KEY` in your `.env` file as part of the quick start below.
 
+## Outbound network allowlist
+
+Allow outbound connections from the client/container to:
+
+- `nwebbed.com` and the nWebbed subdomain configured in `NWEBBED_API_URL` (for example `tarsus.nwebbed.com`), on HTTPS TCP port 443. If your firewall supports wildcard rules, allow `*.nwebbed.com` as well.
+- `*.r2.cloudflarestorage.com` on HTTPS TCP port 443 for filter manifest and archive downloads.
+- **Your configured SMTP server hostname and TCP port** for email alerts: typically 587 for STARTTLS, 465 for TLS from connection, or your relay's configured port (often 25). There is no separate “Python sendmail” domain to allowlist; Python connects directly to the SMTP host you enter on the Alerts page.
+
+Ensure the container can resolve these hostnames through your DNS service.
+
+## Email alerts
+
+Open **Alerts** at `/ui-alerts/` to enter the SMTP hostname, port, TLS mode, optional username/password, sender address, and recipient addresses. Save the settings and use **Send test email** to verify delivery. A test uses saved settings and can be sent while automatic alerts are disabled. Authenticated SMTP requires TLS; use the no-TLS option only for a trusted unauthenticated relay. Sending uses Python's standard-library [`smtplib.sendmail`](https://docs.python.org/3/library/smtplib.html#smtplib.SMTP.sendmail), so no system sendmail installation is needed.
+
+Enable any combination of:
+
+- **Sync failures:** manual and scheduled remote-manifest, download, extraction, and checksum failures.
+- **Filter loading and manifest failures:** startup loading, partial filter loading, local manifest generation, and reload failures.
+- **No filters loaded:** detected at startup, reload, or when saving enabled alert settings.
+- **Critical service errors:** unhandled request/background errors and other HTTP 5xx responses. Sync and SMTP failures are handled separately to avoid duplicate notifications and email loops.
+
+Alerts are disabled by default. The first qualifying event queues an email; repeat attempts in the same category are suppressed for the configured cooldown (default 15 minutes), including scheduled sync retries. Cooldowns and the latest 20 delivery attempts are kept in memory and reset on restart. Saving settings resets cooldowns. SMTP failures appear on the Alerts page and in diagnostic logs without interrupting sync or credential checks. Queued alerts use the current saved configuration; disabling a category cancels its queued sends. Email content includes the client hostname, UTC time, and issue category, without request bodies, credentials, or raw exception text.
+
+Settings persist in `filters/.alerts.json` (override with `HUSHCLIENT_ALERT_SETTINGS_PATH`), covered by the existing Docker filters volume. The SMTP password is stored locally in this file with owner-only permissions on POSIX and is never returned by the settings API. Protect the file and its backups; the password is not encrypted at rest. Leave the password field blank to retain it, or select **Clear saved password** to remove it. Keep the management UI/API accessible only to trusted administrators.
+
+Alerts cover issues detected while this Python process is running. A stopped container, host/network outage, or abrupt process termination requires external monitoring. Successful SMTP acceptance does not guarantee delivery to the recipient's inbox.
+
+## UI navigation and progress
+
+Credential Check, Filter Sync, Logs, Alerts, and Swagger **Docs** (`/docs`) are linked from the UI. Every page includes links to both Global and EU nWebbed Hushfilters dashboards.
+
+The Filter Sync **Progress** panel shows remote-manifest fetching, checking/downloading archives, extracting filters, checksum verification, local manifest generation, and reload. Download progress uses bytes when the server supplies a size; extraction and verification use file counts within each archive. Unknown totals show an indeterminate bar. Already-current filters skip extraction and verification of downloaded archives. Manual steps show only their relevant phases, and failed operations retain the failing phase.
+
+Operational log panels can be collapsed. When expanded, **Auto-scroll to latest entries** is enabled by default; turn it off to read earlier entries. The Logs panel refreshes every two seconds while expanded and visible, and sync status refreshes every second while visible.
+
 ## Quick Start
   
 ```
@@ -206,6 +241,11 @@ username\tpassword\tTrue/False\tmatch_count
 - `GET /docs`
 - `GET /ui-check`
 - `GET /ui-sync`
+- `GET /ui-logs`
+- `GET /ui-alerts`
+- `GET /alerts/settings`
+- `PUT /alerts/settings`
+- `POST /alerts/test`
 - `GET /health`
 - `GET /stats`
 - `GET /check`

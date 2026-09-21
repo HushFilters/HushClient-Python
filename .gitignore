@@ -177,3 +177,7 @@ cython_debug/
 #.idea/
 
 logs/
+
+# SMTP alert credentials and atomic settings writes
+filters/.alerts.json
+filters/.alerts-*.tmp

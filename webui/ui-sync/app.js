@@ -26,6 +26,7 @@ async function refreshLoadedCount() {
 }
 
 function renderOutput(payload) {
+  renderProgress(payload);
   const output = document.getElementById("sync-output");
   const lines = [];
 
@@ -256,7 +257,6 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
         completedRun.status === "success" ? "Scheduled filter update complete" : "Scheduled filter update failed",
         completedRun.status === "success" ? "ok" : "bad",
       );
-      setMetric("downloaded-count", (completedRun.downloaded?.length || 0) + (completedRun.redownloaded?.length || 0));
       void refreshLoadedCount();
     }
     autoUpdateWasActive = false;
@@ -312,14 +312,18 @@ async function saveAutoUpdateSchedule(event) {
 }
 
 let liveLogPollTimer = null;
+let statusPollBusy = false;
+let localOperationRunning = false;
 
 function renderStatusLogs(payload) {
+  renderProgress(payload);
   const output = document.getElementById("sync-output");
   const lines = [];
 
   if (payload.operation) {
     lines.push(`operation: ${payload.operation}`);
   }
+  if (payload.detail) lines.push(`detail: ${payload.detail}`);
   if (Array.isArray(payload.logs) && payload.logs.length > 0) {
     lines.push("");
     lines.push(...payload.logs);
@@ -331,10 +335,21 @@ function renderStatusLogs(payload) {
 }
 
 async function pollLiveStatus() {
-  const payload = await fetchSyncStatus();
-  if (payload && (payload.active || (Array.isArray(payload.logs) && payload.logs.length > 0))) {
-    renderStatusLogs(payload);
-  }
+  if (statusPollBusy || document.hidden) return;
+  statusPollBusy = true;
+  try {
+    const payload = await fetchSyncStatus();
+    if (!payload) return;
+    renderProgress(payload);
+    setButtonsDisabled(payload.active || localOperationRunning);
+    if (payload.operation) {
+      renderStatusLogs(payload);
+      if (!localOperationRunning) {
+        setStatus(payload.active ? "Filter operation running…" : (payload.success ? "Filter operation complete" : "Filter operation failed"),
+          payload.active ? "" : (payload.success ? "ok" : "bad"));
+      }
+    }
+  } finally { statusPollBusy = false; }
 }
 
 async function fetchSyncStatus() {
@@ -398,6 +413,7 @@ async function waitForOperationCompletion(expectedOperation) {
 }
 
 async function runOperation({ endpoint, inProgress, success, failure, onSuccess }) {
+  localOperationRunning = true;
   setButtonsDisabled(true);
   setStatus(inProgress);
   document.getElementById("sync-output").textContent = `Starting ${inProgress.toLowerCase()}`;
@@ -412,7 +428,6 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
 
     if (!response.ok || payload.success === false) {
       setStatus(`${failure}${response.ok ? "" : ` (${response.status})`}`, "bad");
-      setMetric("downloaded-count", payload.downloaded?.length || 0);
       renderOutput(payload);
       return;
     }
@@ -426,12 +441,14 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     setStatus("Client error", "bad");
     renderOutput({ detail: err instanceof Error ? err.message : String(err) });
   } finally {
-    stopLiveLogPolling();
+    localOperationRunning = false;
     setButtonsDisabled(false);
+    await pollLiveStatus();
   }
 }
 
 async function runBackgroundApplyOperation({ endpoint, operation, inProgress, success, failure, onSuccess }) {
+  localOperationRunning = true;
   setButtonsDisabled(true);
   setStatus(inProgress);
   document.getElementById("sync-output").textContent = `Starting ${inProgress.toLowerCase()}`;
@@ -452,7 +469,6 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     const finalPayload = await waitForOperationCompletion(operation);
     if (finalPayload.success !== true) {
       setStatus(failure, "bad");
-      setMetric("downloaded-count", finalPayload.downloaded?.length || 0);
       renderOutput(finalPayload);
       return;
     }
@@ -466,11 +482,14 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     setStatus("Client error", "bad");
     renderOutput({ detail: err instanceof Error ? err.message : String(err) });
   } finally {
+    localOperationRunning = false;
     setButtonsDisabled(false);
+    await pollLiveStatus();
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  startLiveLogPolling();
   refreshLoadedCount();
   void refreshAutoUpdateStatus();
 
@@ -492,7 +511,6 @@ window.addEventListener("DOMContentLoaded", () => {
   }, 5000);
 
   document.getElementById("apply-button").addEventListener("click", () => {
-    setMetric("downloaded-count", 0);
     runBackgroundApplyOperation({
       endpoint: "/sync/apply",
       operation: "sync_apply",
@@ -500,22 +518,17 @@ window.addEventListener("DOMContentLoaded", () => {
       success: "Filter sync, manifest update, and reload complete",
       failure: "Combined filter update failed",
       async onSuccess(payload) {
-        setMetric("downloaded-count", payload.downloaded?.length || 0);
         await refreshLoadedCount();
       },
     });
   });
 
   document.getElementById("sync-button").addEventListener("click", () => {
-    setMetric("downloaded-count", 0);
     runOperation({
       endpoint: "/sync/filters",
       inProgress: "Running filter sync...",
       success: "Filter sync complete",
       failure: "Filter sync failed",
-      onSuccess(payload) {
-        setMetric("downloaded-count", payload.downloaded.length);
-      },
     });
   });
 
@@ -540,3 +553,35 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   });
 });
+
+let previousProgress = '';
+function renderProgress(payload) {
+  if (!Array.isArray(payload.progress)) return;
+  const signature = JSON.stringify([payload.progress, payload.active, payload.success]);
+  if (signature === previousProgress) return;
+  previousProgress = signature;
+  const summary = document.getElementById('progress-summary');
+  summary.textContent = payload.active ? 'Operation in progress' : (payload.success === true ? 'Operation complete' : (payload.success === false ? 'Operation failed' : 'No operation started yet.'));
+  const container = document.getElementById('sync-progress');
+  container.replaceChildren();
+  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Extract filters', verify: 'Verify checksums', manifest: 'Update local manifest', reload: 'Reload filters' };
+  const statuses = { pending: 'Waiting', running: 'In progress', complete: 'Complete', failed: 'Failed', skipped: 'Not needed' };
+  payload.progress.forEach(phase => {
+    const row = document.createElement('div');
+    row.className = `progress-phase progress-phase--${phase.status}`;
+    const label = document.createElement('label');
+    label.htmlFor = `progress-${phase.phase}`;
+    label.textContent = labels[phase.phase] || phase.phase;
+    const state = document.createElement('span');
+    const percent = phase.total > 0 ? Math.min(100, Math.max(0, phase.completed / phase.total * 100)) : null;
+    state.textContent = `${statuses[phase.status] || phase.status}${percent !== null ? ` · ${Math.floor(percent)}%` : ''}`;
+    const bar = document.createElement('progress');
+    bar.id = label.htmlFor;
+    bar.max = 100;
+    if (!(phase.status === 'running' && percent === null)) bar.value = percent || 0;
+    const detail = document.createElement('small');
+    detail.textContent = phase.detail;
+    row.append(label, state, bar, detail);
+    container.appendChild(row);
+  });
+}

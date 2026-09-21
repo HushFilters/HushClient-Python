@@ -13,6 +13,8 @@ from urllib.parse import quote, urlsplit
 
 import requests
 
+from .progress import report
+
 logger = logging.getLogger(__name__)
 
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
@@ -163,12 +165,17 @@ class R2Client:
                         progress_reporter.set_downloaded(0)
                         continue
 
+                    downloaded_bytes = resume_from
+                    report("download", downloaded_bytes, total_bytes, "Downloading archive")
                     write_mode = "ab" if resume_from > 0 else "wb"
                     with destination.open(write_mode) as handle:
                         for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                             if chunk:
                                 handle.write(chunk)
                                 progress_reporter.advance(len(chunk))
+                                downloaded_bytes += len(chunk)
+                                report("download", downloaded_bytes, total_bytes,
+                                       f"{_format_byte_count(downloaded_bytes)} / {_format_byte_count(total_bytes)}")
                     progress_reporter.finish(success=True)
                     return
                 except (requests.RequestException, OSError, R2ClientError) as exc:
