@@ -4,39 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hush Client Logs</title>
-  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260920b">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260922b">
   <link rel="stylesheet" href="/ui-logs/styles.css?v=20260920b">
 </head>
 <body>
   <main class="workspace-shell"><section class="workspace-panel">
     {{TEST_MODE_BANNER}}
-      <header class="workspace-header">
-        <div class="workspace-brand">
-          <img
-            class="workspace-brand__logo"
-            src="/ui-assets/images/nWebbed_PrimaryTransparent.svg"
-            alt="nWebbed"
-          >
-          <div class="workspace-brand__copy">
-            <p class="workspace-brand__eyebrow">HushFilter Operations</p>
-            <p class="workspace-brand__caption">Workflow for sync, manifest rotation, and live filter reloads.</p>
-          </div>
-        </div>
-
-        <nav class="workspace-nav" aria-label="Tool navigation">
-          <a class="workspace-nav-link" href="/ui-check/">Credential Check</a>
-          <a class="workspace-nav-link" href="/ui-sync/">Filter Sync</a>
-          <a class="workspace-nav-link active" href="/ui-logs/">Logs</a>
-          <a class="workspace-nav-link" href="/ui-alerts/">Alerts</a>
-          <a class="workspace-nav-link" href="/docs">Docs</a>
-        </nav>
-      </header>
+      {{WORKSPACE_HEADER}}
 
 
     <div class="workspace-body">
       <section class="surface-card"><div class="surface-card__inner">
         <h1 class="section-title">Client Logs</h1>
         <p class="section-copy">View and download local diagnostics, including sync failures and application errors.</p>
+        <p class="section-copy">Logs rotate through one active file and three backups. The oldest history is removed as new logs arrive; downloads combine all retained files.</p>
         <p id="log-size">Loading log size…</p>
         <form id="log-settings">
           <fieldset disabled id="log-options">
@@ -74,6 +55,6 @@
     {{WORKSPACE_FOOTER}}
   </section></main>
   <script src="/ui-assets/log-window.js?v=20260920b" defer></script>
-  <script src="/ui-logs/app.js?v=20260920b" defer></script>
+  <script src="/ui-logs/app.js?v=20260922b" defer></script>
 </body>
 </html>

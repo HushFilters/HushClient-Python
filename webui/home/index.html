@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hushfilters — Home</title>
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260922b">
+</head>
+<body>
+  <main class="workspace-shell"><section class="workspace-panel">
+    {{TEST_MODE_BANNER}}
+    {{WORKSPACE_HEADER}}
+    <div class="workspace-body home-body">
+      <section class="surface-card surface-card--accent"><div class="surface-card__inner">
+        <p class="section-eyebrow">nWebbed Hushfilters</p>
+        <h1 class="section-title">Check credentials against breach data, locally.</h1>
+        <p class="section-copy">Hushfilters uses compact Bloom filters to check whether a username and password combination may appear in known breach data. This client downloads the filters from nWebbed and checks them on your own infrastructure.</p>
+        <p class="section-copy">The Credential Check page hashes credentials in your browser before sending the digest to this client. Raw credentials entered on that page stay in your browser.</p>
+        <p class="section-copy">A match indicates possible exposure: Bloom filters can produce false positives. Results depend on the filters you have loaded, so keep them up to date.</p>
+        <div class="home-actions">
+          <a class="action-button" href="/ui-check/">Check credentials</a>
+          <a class="action-button action-button--secondary" href="/ui-sync/">Sync filters</a>
+        </div>
+      </div></section>
+      <section class="surface-card"><div class="surface-card__inner">
+        <h2 class="home-heading">Start with fresh filters</h2>
+        <p class="section-copy">On a new installation, open Filter Sync and select <strong>sync, update manifest, and reload filters</strong>. Wait for the operation to complete before checking credentials. You can also schedule daily updates there.</p>
+      </div></section>
+      <div class="home-tools">
+        <section class="surface-card"><div class="surface-card__inner">
+          <h2 class="home-heading"><a href="/ui-check/">Credential Check</a></h2>
+          <p class="section-copy">Check a username and password combination against your loaded filters.</p>
+        </div></section>
+        <section class="surface-card"><div class="surface-card__inner">
+          <h2 class="home-heading"><a href="/ui-sync/">Filter Sync</a></h2>
+          <p class="section-copy">Download current filters, update the manifest, reload the client, and manage automatic updates.</p>
+        </div></section>
+        <section class="surface-card"><div class="surface-card__inner">
+          <h2 class="home-heading"><a href="/ui-logs/">Logs</a></h2>
+          <p class="section-copy">Review operational diagnostics, choose what to record, and download retained logs.</p>
+        </div></section>
+        <section class="surface-card"><div class="surface-card__inner">
+          <h2 class="home-heading"><a href="/ui-alerts/">Alerts</a></h2>
+          <p class="section-copy">Configure email notifications for sync failures, filter issues, and expiring certificates.</p>
+        </div></section>
+        <section class="surface-card"><div class="surface-card__inner">
+          <h2 class="home-heading"><a href="/docs">API Docs</a></h2>
+          <p class="section-copy">Explore the API and try requests in Swagger. Use the <a href="/endpoints">endpoint directory</a> for the JSON listing.</p>
+        </div></section>
+      </div>
+    </div>
+    {{WORKSPACE_FOOTER}}
+  </section></main>
+</body>
+</html>

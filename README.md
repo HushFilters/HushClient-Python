@@ -2,13 +2,53 @@
 
 Python implementation for checking HushFilter bloom filters for credential membership.
 
-## Supported Inputs
+## Quick Start
 
-The CLI and API accept only:
-- `username + password`
-- precomputed SHA-256 hash (64-char hex digest of `username+nWebbed+password`)
-- CLI: batch credentials from TSV
-- API: batch credentials in the form of username + password, and SHA-256 hashes
+**You'll need:** Docker with Compose and an [nWebbed API key](#acquiring-your-nwebbed-api-key). The initial filter download can exceed **50 GB**, so allow enough disk space and time for the first sync.
+
+### 1. Prepare your configuration
+
+Clone this repository and open a terminal in its root directory. Create your local configuration files:
+
+```bash
+cp .env.EXAMPLE .env
+cp manifest.json.EXAMPLE manifest.json
+```
+
+Open `.env` and set your API key:
+
+```dotenv
+NWEBBED_API_KEY=your_api_key_here
+```
+
+The client obtains its R2 download credentials automatically from the configured nWebbed API.
+
+### 2. Build and start the client
+
+Run these commands in order, continuing only after each succeeds. The certificate initializer must finish before the application containers start.
+
+```bash
+docker compose build
+docker compose run --rm tls-cert-init
+docker compose up -d
+```
+
+For certificate setup, renewal, or startup recovery, see [Docker TLS and Internal mTLS](#docker-tls-and-internal-mtls).
+
+### 3. Download and load your filters
+
+Open [Filter Sync](https://localhost/ui-sync/) and click **sync, update manifest, and reload filters**. Follow the **Progress** panel and wait for the operation to finish.
+
+### 4. Check a credential
+
+Open [Credential Check](https://localhost/ui-check/) and submit the prepopulated test credentials. After the filters are loaded, the result should be **TRUE**.
+
+| Where to go next | Link |
+| --- | --- |
+| Client home | [https://localhost/](https://localhost/) |
+| Schedule daily updates | [Filter Sync](https://localhost/ui-sync/) |
+| Configure email notifications | [Alerts](https://localhost/ui-alerts/) |
+| Explore the API | [Swagger Docs](https://localhost/docs) |
 
 ## Acquiring your nWebbed API key
 
@@ -23,7 +63,16 @@ The CLI and API accept only:
 5. Choose a **Slot Name**, enter the IP address you will be running Hush on, then click **Save Slot**.
 6. If you don't know your IP address, attempt to use Hush with the API key you just generated, then refresh the Hushfilters config page. Click **Show Usage** to see the IP address that attempted to connect, and whitelist that IP address in your slot.
 
-Add the issued key to `NWEBBED_API_KEY` in your `.env` file as part of the quick start below.
+Add the issued key to `NWEBBED_API_KEY` in your `.env` file as shown in [Quick Start](#quick-start).
+
+## Supported Inputs
+
+The CLI and API accept only:
+
+- `username + password`
+- precomputed SHA-256 hash (64-char hex digest of `username+nWebbed+password`)
+- CLI: batch credentials from TSV
+- API: batch credentials in the form of username + password, and SHA-256 hashes
 
 ## Outbound network allowlist
 
@@ -55,84 +104,76 @@ Alerts cover issues detected while this Python process is running. A stopped con
 
 ## UI navigation and progress
 
-Credential Check, Filter Sync, Logs, Alerts, and Swagger **Docs** (`/docs`) are linked from the UI. Every page includes links to both Global and EU nWebbed Hushfilters dashboards.
+The root URL (`/`) displays the Hushfilters home page, with an overview, first-sync guidance, and links to each tool. The previous JSON API/endpoint listing is now at `/endpoints`; integrations that read that listing should use the new path.
+
+Credential Check, Filter Sync, Logs, Alerts, and Swagger **Docs** (`/docs`) use the same navigation header on every page. The buttons occupy their own row and retain the same order and layout at each screen size. Click the nWebbed brand in the header to return home. Every page includes links to both Global and EU nWebbed Hushfilters dashboards.
 
 The Filter Sync **Progress** panel shows remote-manifest fetching, checking/downloading archives, extracting filters, checksum verification, local manifest generation, and reload. Download progress uses bytes when the server supplies a size; extraction and verification use file counts within each archive. Unknown totals show an indeterminate bar. Already-current filters skip extraction and verification of downloaded archives. Manual steps show only their relevant phases, and failed operations retain the failing phase.
 
 Operational log panels can be collapsed. When expanded, **Auto-scroll to latest entries** is enabled by default; turn it off to read earlier entries. The Logs panel refreshes every two seconds while expanded and visible, and sync status refreshes every second while visible.
 
-## Quick Start
-  
+## Configuration and examples
+
+### Test mode and sample credentials
+
+To use the bundled test filters, set `HUSHFILTER_TEST_MODE=1` in `.env`.
+
+These sample combinations should return **TRUE** in both test and production modes once the corresponding filters are loaded:
+
+| Username | Password |
+| --- | --- |
+| `testusername1@nwebbed.com` | `testpassword1` |
+| `testusername2@nwebbed.com` | `testpassword2` |
+| `testusername3@nwebbed.com` | `testpassword3` |
+| `testusername4@nwebbed.com` | `testpassword4` |
+
+### Automatic updates
+
+Enable the daily updater with `AUTO_UPDATE_FILTERS=1` and choose the container-local 24-hour start time using `AUTO_UPDATE_TIME`.
+
+| Setting | Behavior |
+| --- | --- |
+| `AUTO_UPDATE_TIME=23` | Run the full sync/apply workflow at 11pm each day. |
+| `AUTO_UPDATE_TIME=2` | Run the full sync/apply workflow at 2am each day. |
+| `AUTO_UPDATE_FILTERS=0` | Disable scheduled automatic updates. |
+
+The [Filter Sync UI](https://localhost/ui-sync/) can enable or disable automatic updates and change the start hour without restarting the service. It shows the container timezone, current container time, next scheduled update, live progress, and the latest 20 manual or automatic sync outcomes.
+
+UI changes are saved in `filters/.auto_update_state.json` and take precedence over environment defaults on later starts. The Docker filters volume preserves this state when the API container is recreated. Delete that state file to return to the `AUTO_UPDATE_FILTERS` and `AUTO_UPDATE_TIME` defaults.
+
+### API credential checks
+
+The client fetches R2 credentials from `NWEBBED_API_URL` using `GET` with the header `Authorization: HFKey <NWEBBED_API_KEY>`.
+
+Check a username and password using either request:
+
+```http
+GET /check?username=testusername1@nwebbed.com&password=testpassword1
+Host: localhost
 ```
-git clone {this repo}
 
-cp .env.EXAMPLE .env
-[paste in your nWebbed API key into the newly created .env file]
-
-The client fetches R2 credentials from `NWEBBED_API_URL`
-using `GET` with header `Authorization: HFKey <NWEBBED_API_KEY>`.
-
-cp manifest.json.EXAMPLE manifest.json
-
-docker compose build
-
-# Create/validate certificate files before Compose binds individual files.
-docker compose run --rm tls-cert-init
-
-docker compose up
-
-Navigate to https://localhost/ui-sync/
-
-Click on "sync, update manifest, and reload filters"
-
-Wait... You will have large files to download at first. (50+ GB)
-
-When finished, navigate to https://localhost/ui-check/
-
-The prepopulated value should return TRUE when submitted
-
-You can check raw username + password combinations like so:
-
-GET https://localhost/check?username=testusername1@nwebbed.com&password=testpassword1
-
-POST https://localhost/check
+```http
+POST /check
+Host: localhost
+Content-Type: application/json
 
 {
   "username": "testusername1@nwebbed.com",
   "password": "testpassword1"
 }
-
-Internally, raw usernames and passwords are hashed: SHA256(username+nWebbed+password)
-
-Instead of sending raw credentials, you can hash beforehand and check the hash directly:
-
-POST https://localhost/checkhash
-
-{
-    "hash": "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
-}
-
-
-To run the application in TEST MODE with bundled test filters, set HUSHFILTER_TEST_MODE=1 in your .env file.
-
-To enable the built-in daily auto updater, set AUTO_UPDATE_FILTERS=1 and choose the container-local 24-hour run hour with AUTO_UPDATE_TIME.
-Examples:
-- `AUTO_UPDATE_TIME=23` runs the full sync/apply workflow at 11pm each day
-- `AUTO_UPDATE_TIME=2` runs the full sync/apply workflow at 2am each day
-- `AUTO_UPDATE_FILTERS=0` disables scheduled auto updates
-
-The Filter Sync UI at `/ui-sync/` can also enable or disable automatic updates and change the run hour without restarting the service. The UI shows the container timezone, current container time, next scheduled update, live progress in the operational log, and summary outcomes for the latest 20 manual or automatic syncs.
-
-UI changes are persisted to `filters/.auto_update_state.json`, which takes precedence over the environment defaults on later starts. The existing `filters:/app/filters` Docker volume preserves this state when the API container is recreated. Delete that state file to return to the `AUTO_UPDATE_FILTERS` and `AUTO_UPDATE_TIME` defaults.
-
-These username+password combinations should always return TRUE in both test and production modes:
-
-testusername1@nwebbed.com testpassword1
-testusername2@nwebbed.com testpassword2
-testusername3@nwebbed.com testpassword3
-testusername4@nwebbed.com testpassword4
 ```
 
+Use HTTPS for these requests. The client hashes raw inputs as `SHA256(username+nWebbed+password)`. To hash locally before sending, submit the digest instead:
+
+```http
+POST /checkhash
+Host: localhost
+Content-Type: application/json
+
+{
+  "hash": "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
+}
+```
 
 ### CLI
 ```bash
@@ -329,7 +370,9 @@ Open **Logs** at `/ui-logs/` to view local diagnostics, see their total retained
 
 By default, errors, warnings, and sync activity are recorded. Logs include application startup/load failures, request failures, background exceptions, and sync/download failures. Request summaries omit request bodies and query strings. Successful GET/HEAD requests (including status polling, health checks, and page loads) are not recorded, even with Everything enabled, so routine reads cannot rotate away useful diagnostics. Failed requests and other application errors remain eligible under the selected categories. Logging covers the Python application; Docker/nginx logs and failures before the application starts remain available through `docker compose logs`.
 
-Logs are stored in `logs/hushclient.log`, with three rotated backups of up to 10 MiB each (approximately 40 MiB retained in total). The UI previews the latest 256 KiB; the download includes all retained files. Settings are saved in `logs/settings.json`. Docker Compose mounts `./logs` so diagnostics and settings survive container recreation. Set `HUSHCLIENT_LOG_DIR` to change this directory outside Docker, or mount the matching directory when overriding it in Docker.
+Logs are stored in `logs/hushclient.log`, with three rotated backups (`hushclient.log.1` through `.3`). Each file holds up to 256 MiB, for approximately **1 GiB (1,024 MiB) of total retention**. These are consecutive parts of the same log: the active file receives new entries, `.1` is the newest backup, and `.3` is the oldest. Rotation discards the oldest backup as new history arrives, keeping disk usage bounded without growing a single file indefinitely. Existing logs remain available when upgrading to the larger limit.
+
+The UI previews the latest 256 KiB; the download combines all retained files from oldest to newest. Settings are saved in `logs/settings.json`. Docker Compose mounts `./logs` so diagnostics and settings survive container recreation. Set `HUSHCLIENT_LOG_DIR` to change this directory outside Docker, or mount the matching directory when overriding it in Docker.
 
 Scheduled updates retry failed filter sync/download stages every five minutes, for up to one hour after the original scheduled start. Each attempt is recorded in history and the log file. Existing partial downloads are reused by the downloader. The sync page shows the next retry and the window deadline. No new retry begins after the deadline; an attempt already running may finish later. Manifest-generation and reload failures do not trigger download retries. Changing or disabling the schedule cancels pending retries; a running attempt is allowed to finish. Restarting the app resets a pending retry window, and the next daily schedule applies.
 
@@ -352,7 +395,8 @@ username\tpassword\tTrue/False\tmatch_count
 
 ## API Endpoints
 
-- `GET /`
+- `GET /` — home page (HTML)
+- `GET /endpoints` — API information and endpoint listing (JSON)
 - `GET /docs`
 - `GET /ui-check`
 - `GET /ui-sync`

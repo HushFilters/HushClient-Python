@@ -34,7 +34,7 @@ class DiagnosticLogs(RotatingFileHandler):
             pass
         except (OSError, ValueError) as exc:
             settings_error = exc
-        super().__init__(directory / "hushclient.log", maxBytes=10 * 1024 * 1024,
+        super().__init__(directory / "hushclient.log", maxBytes=256 * 1024 * 1024,
                          backupCount=3, encoding="utf-8")
         self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         if settings_error:

@@ -59,16 +59,23 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
     with TestClient(api.app) as client:
         root_response = client.get("/")
         assert root_response.status_code == 200
-        assert root_response.json()["test_mode"] is False
-        assert root_response.json()["endpoints"]["ui_check"] == "/ui-check"
-        assert root_response.json()["endpoints"]["ui_sync"] == "/ui-sync"
-        assert root_response.json()["endpoints"]["sync_filters"] == "/sync/filters"
-        assert root_response.json()["endpoints"]["sync_apply"] == "/sync/apply"
-        assert root_response.json()["endpoints"]["sync_status"] == "/sync/status"
-        assert root_response.json()["endpoints"]["auto_update"] == "/sync/auto-update"
-        assert root_response.json()["endpoints"]["update_manifest"] == "/sync/manifest"
-        assert root_response.json()["endpoints"]["reload_filters"] == "/sync/reload"
-        assert "ui" not in root_response.json()["endpoints"]
+        assert root_response.headers["content-type"].startswith("text/html")
+        assert "Hushfilters" in root_response.text and "Bloom filters" in root_response.text
+        assert 'href="/endpoints"' in root_response.text
+        assert "TEST MODE" not in root_response.text
+        endpoints_response = client.get("/endpoints")
+        assert endpoints_response.status_code == 200
+        assert endpoints_response.json()["test_mode"] is False
+        assert endpoints_response.json()["endpoints"]["home"] == "/"
+        assert endpoints_response.json()["endpoints"]["ui_check"] == "/ui-check"
+        assert endpoints_response.json()["endpoints"]["ui_sync"] == "/ui-sync"
+        assert endpoints_response.json()["endpoints"]["sync_filters"] == "/sync/filters"
+        assert endpoints_response.json()["endpoints"]["sync_apply"] == "/sync/apply"
+        assert endpoints_response.json()["endpoints"]["sync_status"] == "/sync/status"
+        assert endpoints_response.json()["endpoints"]["auto_update"] == "/sync/auto-update"
+        assert endpoints_response.json()["endpoints"]["update_manifest"] == "/sync/manifest"
+        assert endpoints_response.json()["endpoints"]["reload_filters"] == "/sync/reload"
+        assert "ui" not in endpoints_response.json()["endpoints"]
 
         check_response = client.get("/ui-check/")
         assert check_response.status_code == 200
@@ -79,7 +86,7 @@ def test_root_and_ui_endpoints(monkeypatch) -> None:
         sync_response = client.get("/ui-sync/")
         assert sync_response.status_code == 200
         assert "sync, update manifest, and reload filters" in sync_response.text
-        assert "/ui-sync/app.js?v=20260920b" in sync_response.text
+        assert "/ui-sync/app.js?v=" in sync_response.text
         assert "Daily Auto-Update" in sync_response.text
         assert "Recent sync history" in sync_response.text
         assert "sync filters from nWebbed" in sync_response.text
@@ -97,7 +104,9 @@ def test_test_mode_is_exposed_in_api_responses_and_ui(monkeypatch) -> None:
     with TestClient(api.app) as client:
         root_response = client.get("/")
         assert root_response.status_code == 200
-        assert root_response.json()["test_mode"] is True
+        assert "TEST MODE" in root_response.text
+        assert client.get("/endpoints").json()["test_mode"] is True
+        assert "TEST MODE" in client.get("/docs").text
 
         health_response = client.get("/health")
         assert health_response.status_code == 200

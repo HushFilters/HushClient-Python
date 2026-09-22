@@ -28,7 +28,7 @@ async function refresh() {
   try {
     const payload = await request('/logs');
     document.getElementById('log-size').textContent =
-      `Total retained size: ${payload.size_bytes.toLocaleString()} bytes (${(payload.size_bytes / 1048576).toFixed(2)} MiB). Retention: up to ${payload.max_size_bytes / 1048576} MiB across four files.`;
+      `Total retained size: ${payload.size_bytes.toLocaleString()} bytes (${(payload.size_bytes / 1048576).toFixed(2)} MiB). Retention: up to ${payload.max_size_bytes / 1073741824} GiB across one active log and three rotated backups.`;
     document.getElementById('log-output').textContent = payload.text || 'No log entries.';
     logStatus.textContent = payload.truncated ? 'Showing the latest 256 KiB. Download to view all retained logs.' : 'Showing all retained logs.';
     if (!loadedSettings) {

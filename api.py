@@ -208,9 +208,7 @@ def _with_test_mode(payload: dict) -> dict:
     return {**payload, "test_mode": _is_test_mode_enabled()}
 
 
-def _render_ui_page(page_name: str) -> HTMLResponse:
-    page_path = Path("webui") / page_name / "index.html"
-    html = page_path.read_text(encoding="utf-8")
+def _render_ui_html(html: str, page_name: str) -> HTMLResponse:
     banner_html = ""
     if _is_test_mode_enabled():
         banner_html = (
@@ -219,7 +217,19 @@ def _render_ui_page(page_name: str) -> HTMLResponse:
             "</div>"
         )
     footer = Path("webui/assets/footer.html").read_text(encoding="utf-8")
-    return HTMLResponse(content=html.replace("{{TEST_MODE_BANNER}}", banner_html).replace("{{WORKSPACE_FOOTER}}", footer))
+    header = Path("webui/assets/header.html").read_text(encoding="utf-8")
+    for page, href in (("ui-check", "/ui-check/"), ("ui-sync", "/ui-sync/"),
+                       ("ui-logs", "/ui-logs/"), ("ui-alerts", "/ui-alerts/"), ("docs", "/docs")):
+        if page == page_name:
+            header = header.replace(f'class="workspace-nav-link" href="{href}"',
+                                    f'class="workspace-nav-link active" href="{href}" aria-current="page"')
+    return HTMLResponse(content=html.replace("{{TEST_MODE_BANNER}}", banner_html)
+                        .replace("{{WORKSPACE_HEADER}}", header).replace("{{WORKSPACE_FOOTER}}", footer))
+
+
+def _render_ui_page(page_name: str) -> HTMLResponse:
+    html = (Path("webui") / page_name / "index.html").read_text(encoding="utf-8")
+    return _render_ui_html(html, page_name)
 
 
 @asynccontextmanager
@@ -518,13 +528,21 @@ class AutoUpdateStatusResponse(ApiResponse):
 
 
 # API Endpoints
-@app.get("/", tags=["General"])
+@app.get("/", tags=["General"], response_class=HTMLResponse)
 async def root():
-    """Root endpoint with API information."""
+    """Hushfilters home page with product information and navigation."""
+    return _render_ui_page("home")
+
+
+@app.get("/endpoints", tags=["General"])
+async def endpoints():
+    """API information and endpoint directory."""
     return _with_test_mode({
         "name": "HushFilter API",
         "version": "1.0.0",
         "endpoints": {
+            "home": "/",
+            "endpoints": "/endpoints",
             "ui_check": "/ui-check",
             "ui_sync": "/ui-sync",
             "ui_logs": "/ui-logs",
@@ -697,10 +715,12 @@ async def send_test_alert():
 async def docs_page():
     swagger = get_swagger_ui_html(openapi_url=app.openapi_url, title="HushFilter API - Swagger UI")
     html = swagger.body.decode("utf-8")
-    header = Path("webui/assets/docs-header.html").read_text(encoding="utf-8")
-    footer = Path("webui/assets/footer.html").read_text(encoding="utf-8")
-    html = html.replace("<body>", "<body>" + header).replace("</body>", footer + "</body>")
-    return HTMLResponse(html)
+    html = html.replace("</head>", '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                        '<link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260922b"></head>')
+    html = html.replace("<body>", '<body><main class="workspace-shell"><section class="workspace-panel">'
+                        '{{TEST_MODE_BANNER}}{{WORKSPACE_HEADER}}<div class="docs-content">')
+    html = html.replace("</body>", '</div>{{WORKSPACE_FOOTER}}</section></main></body>')
+    return _render_ui_html(html, "docs")
 
 
 # Static UI

@@ -45,6 +45,8 @@ def test_category_union_off_persistence_and_redaction(tmp_path, monkeypatch):
 
 def test_rotation_export_and_clear(tmp_path):
     handler = DiagnosticLogs(tmp_path)
+    assert handler.maxBytes == 256 * 1024 * 1024
+    assert handler.snapshot()["max_size_bytes"] == 1024 * 1024 * 1024
     handler.maxBytes = 400
     handler.configure(settings(everything=True))
     try:
@@ -91,6 +93,7 @@ def test_logs_api_sync_failure_and_machine_id(client, monkeypatch):
     monkeypatch.setattr(api, "sync_filters", fail)
     assert client.post("/sync/filters").status_code == 500
     payload = client.get("/logs").json()
+    assert payload["max_size_bytes"] == 1024 * 1024 * 1024
     assert "Download connection lost" in payload["text"]
     assert "Traceback" in payload["text"]
     assert payload["size_bytes"] > 0

@@ -283,7 +283,7 @@ def test_startup_filter_failure_sends_alert(monkeypatch, tmp_path):
     assert "startup" in send.call_args.args[2]
 
 
-@pytest.mark.parametrize("path", ["/ui-check/", "/ui-sync/", "/ui-logs/", "/ui-alerts/", "/docs"])
+@pytest.mark.parametrize("path", ["/", "/ui-check/", "/ui-sync/", "/ui-logs/", "/ui-alerts/", "/docs"])
 def test_navigation_footer_and_docs(client, path):
     response = client.get(path)
     assert response.status_code == 200
@@ -292,8 +292,19 @@ def test_navigation_footer_and_docs(client, path):
     assert 'https://www.nwebbed.com/dashboard/product-configs/hushfilters' in response.text
     assert 'https://eu.nwebbed.com/dashboard/product-configs/hushfilters' in response.text
     assert "{{WORKSPACE_FOOTER}}" not in response.text
+    assert "{{WORKSPACE_HEADER}}" not in response.text
+    assert 'class="workspace-header"' in response.text
+    assert 'aria-label="Hushfilters home"' in response.text
+    # All pages use the same header; only the active tool's state changes.
+    header = response.text.split('<header class="workspace-header">', 1)[1].split('</header>', 1)[0]
+    if path != "/":
+        assert header.count('aria-current="page"') == 1
+        assert f'href="{path}" aria-current="page"' in header
+    baseline = client.get("/").text.split('<header class="workspace-header">', 1)[1].split('</header>', 1)[0]
+    assert header.replace('workspace-nav-link active', 'workspace-nav-link').replace(' aria-current="page"', '') == baseline
     if path == "/docs":
         assert "SwaggerUIBundle" in response.text and "/openapi.json" in response.text
+        assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in response.text
     if path == "/ui-sync/":
         assert 'id="sync-progress"' in response.text
         assert 'downloaded-count' not in response.text
