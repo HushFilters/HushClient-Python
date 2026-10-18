@@ -360,8 +360,8 @@ async def unexpected_exception_handler(_request: Request, exc: Exception) -> JSO
 # Request/Response Models
 class CheckRequest(BaseModel):
     """Request model for single credential check."""
-    username: str = Field(..., description="Username to check")
-    password: str = Field(default="", description="Password to check (optional)")
+    username: str = Field(..., description="Account/username to check; Unicode default lowercase is applied before hashing, without trimming")
+    password: str = Field(default="", description="Case-sensitive password to check (optional); preserved exactly")
 
 
 class BatchCheckRequest(BaseModel):
@@ -371,12 +371,12 @@ class BatchCheckRequest(BaseModel):
 
 class SingleHashCheckRequest(BaseModel):
     """Request model for single precomputed SHA-256 hash check."""
-    hash: str = Field(..., description="Single SHA-256 hash (64-character hex string)")
+    hash: str = Field(..., description='SHA256(UTF8(lowercase(username) + "nWebbed" + password)), 64-character hex; lowercase the account before hashing')
 
 
 class BatchHashCheckRequest(BaseModel):
     """Request model for batch SHA-256 hash checks."""
-    hashes: List[str] = Field(..., description="List of SHA-256 hashes (64-character hex strings)")
+    hashes: List[str] = Field(..., description='List of SHA256(UTF8(lowercase(username) + "nWebbed" + password)) hex strings; preserve password case and whitespace')
 
 
 class ApiResponse(BaseModel):
@@ -756,6 +756,8 @@ async def get_stats():
 async def check_credential(request: CheckRequest):
     """
     Check if a single credential exists in the bloom filter(s).
+
+    Account uses Unicode default lowercase before hashing; password and whitespace are preserved.
     
     Returns information about whether the credential was found and in which filters.
     """
@@ -775,11 +777,13 @@ async def check_credential(request: CheckRequest):
 
 @app.get("/check", response_model=CheckResponse, tags=["Check"])
 async def check_credential_get(
-    username: str = Query(..., description="Username to check"),
-    password: str = Query("", description="Password to check (optional)")
+    username: str = Query(..., description="Account/username to check; Unicode default lowercase is applied before hashing, without trimming"),
+    password: str = Query("", description="Case-sensitive password to check (optional); preserved exactly")
 ):
     """
     Check if a single credential exists in the bloom filter(s) via GET request.
+
+    Account uses Unicode default lowercase before hashing; password and whitespace are preserved.
     
     Useful for simple URL-based queries.
     """
@@ -801,6 +805,8 @@ async def check_credential_get(
 async def check_credentials_batch(request: BatchCheckRequest):
     """
     Check multiple credentials in a single request.
+
+    Lowercase accounts before hashing; preserve passwords and return submitted username spelling.
     
     Efficiently checks multiple username/password combinations.
     """
@@ -828,6 +834,10 @@ async def check_precomputed_sha256(request: SingleHashCheckRequest):
     """
     Check a single precomputed SHA-256 hash for membership in the loaded filter(s).
 
+    Callers must hash UTF8(lowercase(username) + "nWebbed" + password) using
+    Unicode default lowercase. Preserve password case and whitespace. An already
+    computed digest cannot be normalized by the server.
+
     The provided hash is converted into Bloom probe positions using Murmur3 double-hashing.
     """
     if filter_manager is None:
@@ -848,6 +858,9 @@ async def check_precomputed_sha256(request: SingleHashCheckRequest):
 async def check_precomputed_sha256_batch(request: BatchHashCheckRequest):
     """
     Check multiple precomputed SHA-256 hashes in a single request.
+
+    Each digest must use SHA256(UTF8(lowercase(username) + "nWebbed" + password));
+    lowercase accounts before hashing and preserve password case and whitespace.
 
     Returns only the hashes that were found in at least one loaded filter.
     """

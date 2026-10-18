@@ -49,7 +49,7 @@ async function submitCheck(event) {
   setStatus("Computing SHA-256...");
 
   try {
-    const digest = await sha256Hex(`${username}nWebbed${password}`);
+    const digest = await sha256Hex(`${username.toLowerCase()}nWebbed${password}`);
     hashOutput.textContent = digest;
 
     setStatus("Submitting to /checkhash...");

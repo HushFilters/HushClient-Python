@@ -19,8 +19,12 @@ _DOUBLE_HASH_FALLBACK = 0x9E3779B97F4A7C15
 
 
 def credential_digest(username: str, password: str = "") -> bytes:
-    """Compute the Builder-compatible SHA-256 digest bytes for a credential."""
-    return hashlib.sha256((username + 'nWebbed' + password).encode("utf-8")).digest()
+    """Hash UTF8(lowercase(account) + 'nWebbed' + password).
+
+    Use Unicode default lowercase, not casefold or locale-specific casing.
+    Preserve the password, whitespace, and Unicode normalization form.
+    """
+    return hashlib.sha256((username.lower() + 'nWebbed' + password).encode("utf-8")).digest()
 
 
 def normalize_sha256_hex(sha256_hex: str) -> str:
@@ -43,9 +47,9 @@ def parse_sha256_hex(sha256_hex: str) -> bytes:
 
 def bloom_probe_hashes(digest: bytes, nk: int = 10) -> List[int]:
     """
-    Generate Builder-compatible Bloom probe hashes using Murmur3 double hashing.
+    Generate HushFilter Bloom probe hashes using Murmur3 double hashing.
 
-    The Builder uses two Murmur3 64-bit base hashes with seeds 0 and 1, then
+    The filter format uses two Murmur3 64-bit base hashes with seeds 0 and 1, then
     applies Kirsch-Mitzenmacher double hashing: h(i) = h1 + i*h2.
     """
     if nk <= 0:

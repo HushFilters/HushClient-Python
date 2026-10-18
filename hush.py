@@ -123,7 +123,7 @@ def main():
     # Common arguments
     parser.add_argument('-u', '--username', help='Username to check')
     parser.add_argument('-p', '--password', default='', help='Password to check (optional)')
-    parser.add_argument('--checkhash', help='Single SHA-256 hash (64-char hex) to check for membership')
+    parser.add_argument('--checkhash', help='SHA-256 hex of UTF8(lowercase(username) + nWebbed + password); lowercase the account before hashing')
     parser.add_argument('-t', '--tsv', help='TSV file with username/password pairs to check')
     
     parser.add_argument('-v', '--verbose', action='store_true',

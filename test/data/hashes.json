@@ -1,0 +1,92 @@
+[
+  {
+    "username": "testusername1@nwebbed.com",
+    "password": "testpassword1",
+    "hash": "29f33573df6d1c7aac289e5c75e0bce5e4939e69c0499fb7e2540b7f371c59d9"
+  },
+  {
+    "username": "",
+    "password": "",
+    "hash": "474765d15c71d1c07b6a09f55ac21ab16a117b50c2f5d50f3130b38a394e52c6"
+  },
+  {
+    "username": "username",
+    "password": "",
+    "hash": "33a028296c0e01a0f19fedee17cc542b1e7b28d0140c31d1142146c2c3d95a81"
+  },
+  {
+    "username": " user@example.com ",
+    "password": " PaSs ",
+    "hash": "6ee4a1b2ff8e4c5d24bd464adf8ac5cceddbef8d0f2ade84020bf64a5bd772cc"
+  },
+  {
+    "username": "caf\u00e9\ud83d\udd12",
+    "password": "\u5bc6\u78bc\ud83d\ude80",
+    "hash": "e9ac4f88ed9aed6a5323bbc32952a87b33ed037e99ced78663e060ac0f97d921"
+  },
+  {
+    "username": "cafe\u0301",
+    "password": "\u0000\n",
+    "hash": "10a95b8dd63c1663cb994dbace908a42d32083fc1379526827ce6275461b9bdc"
+  },
+  {
+    "username": "Username1",
+    "password": "PaSsword1",
+    "hash": "7661c4df6aeb09d1f21fe2a450a589e5294037dea737a2c66fc82538eb530f5b"
+  },
+  {
+    "username": "username1",
+    "password": "PaSsword1",
+    "hash": "7661c4df6aeb09d1f21fe2a450a589e5294037dea737a2c66fc82538eb530f5b"
+  },
+  {
+    "username": "USERNAME1",
+    "password": "PaSsword1",
+    "hash": "7661c4df6aeb09d1f21fe2a450a589e5294037dea737a2c66fc82538eb530f5b"
+  },
+  {
+    "username": "username1",
+    "password": "password1",
+    "hash": "17e2c72c47b285840a4d773826e84c0fec120c85963e562695970773e2e33599"
+  },
+  {
+    "username": " UserName1 ",
+    "password": " PaSsword1 ",
+    "hash": "b1a87224eed5ac007fdbea8cd15a02fd47e29ab1c1beeaf4e46b59fee2297b19"
+  },
+  {
+    "username": "CAF\u00c9\ud83d\udd12",
+    "password": "\u5bc6\u78bc\ud83d\ude80",
+    "hash": "e9ac4f88ed9aed6a5323bbc32952a87b33ed037e99ced78663e060ac0f97d921"
+  },
+  {
+    "username": "\u0130USER",
+    "password": "PaSs",
+    "hash": "a4d281f5bc69bf61c18105bf856844610cd8693937c8df99f2d26f676da66e66"
+  },
+  {
+    "username": "i\u0307user",
+    "password": "PaSs",
+    "hash": "a4d281f5bc69bf61c18105bf856844610cd8693937c8df99f2d26f676da66e66"
+  },
+  {
+    "username": "\u039f\u03a3",
+    "password": "PaSs",
+    "hash": "afedf052a880bd334e4833d04c8c99bc03cfff904468ca53a581e4652f1c08c4"
+  },
+  {
+    "username": "\u03bf\u03c2",
+    "password": "PaSs",
+    "hash": "afedf052a880bd334e4833d04c8c99bc03cfff904468ca53a581e4652f1c08c4"
+  },
+  {
+    "username": "Stra\u00dfe",
+    "password": "PaSs",
+    "hash": "020a2fae903d9efa65183cadce8cf2340ff051162a9f20a89d636e024db76486"
+  },
+  {
+    "username": "STRASSE",
+    "password": "PaSs",
+    "hash": "3d7e538906c335f67c5b142ac1a29035e7f219b388fb4e7173a60f1f0b9feace"
+  }
+]

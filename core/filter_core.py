@@ -99,6 +99,8 @@ class FilterManager:
     def check(self, username: str, password: str = "") -> CheckResult:
         """
         Check if credentials exist in the loaded filter(s).
+        Lowercase the account before shard selection and membership hashing;
+        keep password and submitted username spelling unchanged.
         Short-circuits after the first positive match.
         
         Args:

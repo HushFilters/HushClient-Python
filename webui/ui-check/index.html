@@ -32,7 +32,7 @@
                 </li>
                 <li>
                   <strong>nWebbed delimiter</strong>
-                  <span>The input is hashed as <code>username + "nWebbed" + password</code> to match filter probes.</span>
+                  <span>The input is hashed as <code>lowercase(username) + "nWebbed" + password</code> to match filter probes. Accounts are lowercased; password case and whitespace are preserved.</span>
                 </li>
                 <li>
                   <strong>Immediate response surface</strong>
@@ -137,6 +137,6 @@
     </section>
   </main>
 
-  <script src="/ui-check/app.js" defer></script>
+  <script src="/ui-check/app.js?v=20261018" defer></script>
 </body>
 </html>

@@ -199,6 +199,7 @@ class HushFilter:
     def check(self, username: str, password: str) -> bool:
         """
         Check if a username/password combination is in the bloom filter.
+        Hash the Unicode-lowercased account with the unchanged password.
         
         Arguments:
             username: The username/account/email to check

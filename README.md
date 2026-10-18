@@ -70,7 +70,7 @@ Add the issued key to `NWEBBED_API_KEY` in your `.env` file as shown in [Quick S
 The CLI and API accept only:
 
 - `username + password`
-- precomputed SHA-256 hash (64-char hex digest of `username+nWebbed+password`)
+- precomputed SHA-256 hash (64-char hex digest of UTF-8 `lowercase(username) + "nWebbed" + password`)
 - CLI: batch credentials from TSV
 - API: batch credentials in the form of username + password, and SHA-256 hashes
 
@@ -163,7 +163,13 @@ Content-Type: application/json
 }
 ```
 
-Use HTTPS for these requests. The client hashes raw inputs as `SHA256(username+nWebbed+password)`. To hash locally before sending, submit the digest instead:
+**Required account normalization:** Before every check, lowercase only the account/username using Unicode default lowercase (`str.lower()` in Python, `toLowerCase()` in JavaScript). Hash UTF-8 `lowercase(username) + "nWebbed" + password`. Passwords remain case-sensitive; do not trim either input, case-fold the account, use locale-specific casing, or apply NFC/NFKC normalization. `Username1` and `username1` with the same password must have the same digest.
+
+Raw API, CLI and TSV checks normalize automatically through `core.hash.credential_digest`. The browser Credential Check page lowercases before hashing locally. For `/checkhash`, `/checkhash/batch` and CLI `--checkhash`, the caller **must lowercase the account before computing SHA-256**; the server cannot normalize an already computed digest. Updated Python/TypeScript SDK helpers do this automatically. Submitted username spelling is retained in responses, including batch matches.
+
+**Migration:** Every filter selected by the current manifest must follow the normalized account-hashing contract. Confirm compatible data is available from your configured filter service before upgrading HushClient, its browser UI and SDK consumers together, then complete sync, local manifest generation and reload. Updating client code alone does not normalize existing filter data; legacy filters can miss matches for mixed-case source accounts. If rollback is needed, coordinate compatible client versions and filter data with your service administrator. Shared regression vectors in `test/data/hashes.json` are aligned with HushClient-SDKs `testdata/hashes.json`.
+
+Use HTTPS for these requests. The client hashes raw inputs as `SHA256(UTF8(lowercase(username) + "nWebbed" + password))`. To hash locally before sending, submit the digest instead:
 
 ```http
 POST /checkhash
@@ -434,7 +440,7 @@ UI assets are stored in:
 
 Behavior:
 - `/ui-check` accepts `username` and `password`
-- `/ui-check` computes a SHA-256 digest client-side in JavaScript, displays it, and sends `POST /checkhash`
+- `/ui-check` lowercases the username, computes a SHA-256 digest client-side in JavaScript, displays it, and sends `POST /checkhash`
 - `/ui-sync` provides a top-level one-click action to sync filters, update `manifest.json`, and reload the in-memory filters in sequence
 - `/ui-sync` also provides manual `sync filters from nWebbed`, `update manifest`, and `reload with new filters` actions
 - `/ui-sync` calls `POST /sync/apply`, `POST /sync/filters`, `POST /sync/manifest`, and `POST /sync/reload` and renders the outputs on screen

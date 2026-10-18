@@ -2,6 +2,7 @@
   "info": {
     "_postman_id": "d749d0c0-bf70-4980-bfbb-b5dc7c622588",
     "name": "Hush Filters Client",
+    "description": "Credential checks lowercase only Account using Unicode default lowercase. Hash checks require SHA256(UTF8(lowercase(username) + \"nWebbed\" + password)); preserve password case, whitespace and Unicode normalization form.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_exporter_id": "16094237"
   },
