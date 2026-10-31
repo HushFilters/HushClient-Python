@@ -176,7 +176,6 @@ def sync_filters(
     remote_manifest_key = f"{REMOTE_FILTERS_PREFIX}/{REMOTE_MANIFEST_NAME}"
     manifest_payload = active_downloader.download_text(remote_manifest_key)
     manifest = FilterManifest.from_json(manifest_payload)
-    _write_text_atomic(manifest_path, manifest_payload)
     report("prepare", 1, 1, status="complete")
 
     downloaded: list[Path] = []
@@ -246,6 +245,10 @@ def sync_filters(
         for phase in ("extract", "verify"):
             report(phase, detail="Local filters already verified; no archives needed", status="skipped")
     logger.info("finished filter md5 verification")
+
+    # Publish only a fully verified sync; failed downloads must not select a
+    # partial replacement set for manifest generation and cleanup.
+    _write_text_atomic(manifest_path, manifest_payload)
 
     return SyncResult(
         manifest_path=manifest_path,

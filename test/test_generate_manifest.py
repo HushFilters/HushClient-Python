@@ -2,9 +2,23 @@ from __future__ import annotations
 
 import json
 import logging
+import pytest
 from pathlib import Path
 
 from helpers.generate_manifest import generate_manifest
+
+
+def test_missing_filter_preserves_previous_manifest(tmp_path):
+    filters_dir = tmp_path / "filters"
+    filters_dir.mkdir()
+    (filters_dir / "manifest_current.json").write_text(json.dumps({
+        "current_filter_files": [{"path": "missing.hf"}],
+    }))
+    output = tmp_path / "manifest.json"
+    output.write_text('{"filters": ["previous.hf"]}')
+    with pytest.raises(ValueError, match="Missing manifest-listed filter"):
+        generate_manifest(str(filters_dir), str(output))
+    assert json.loads(output.read_text()) == {"filters": ["previous.hf"]}
 
 
 def test_generate_manifest_uses_filters_manifest_current_for_nested_paths(

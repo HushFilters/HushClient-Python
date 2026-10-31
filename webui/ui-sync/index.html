@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
   <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260922b">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20260920b">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261029b">
 </head>
 <body>
   <main class="workspace-shell">
@@ -122,6 +122,47 @@
           </div>
         </section>
 
+        <section class="surface-card auto-update-card">
+          <div class="surface-card__inner auto-update-card__inner">
+            <div>
+              <p class="section-eyebrow">Storage</p>
+              <h2 class="sync-section-heading">Superseded Filter Cleanup</h2>
+              <p class="section-copy">Choose when to delete old filter files after their replacements have successfully loaded. Retention starts when a filter is superseded, not when it was downloaded.</p>
+            </div>
+            <form id="cleanup-form" class="auto-update-form">
+              <label class="field-stack" for="cleanup-mode">
+                <span class="field-label">Automatic deletion</span>
+                <select id="cleanup-mode" class="app-input" disabled>
+                  <option value="retained" selected>Keep for a number of days</option>
+                  <option value="immediate">Immediately after loading</option>
+                  <option value="off">Off — delete manually</option>
+                </select>
+              </label>
+              <label id="cleanup-days-field" class="field-stack" for="cleanup-days">
+                <span class="field-label">Days to keep superseded filters</span>
+                <input id="cleanup-days" class="app-input schedule-hour-input" type="number" min="1" max="31" step="1" value="31" required disabled>
+                <span class="field-help">1–31 days. Default: 31 days.</span>
+              </label>
+              <div class="schedule-actions">
+                <button id="cleanup-save" class="action-button" type="submit" disabled>Save cleanup settings</button>
+                <button id="cleanup-refresh" class="action-button action-button--secondary" type="button">Refresh</button>
+              </div>
+              <p id="cleanup-message" class="status" aria-live="polite">Loading cleanup settings…</p>
+            </form>
+            <p class="section-copy">Existing dated filter files are superseded when successfully loaded filters cover their entire date range for the same shard. Weekly builds can replace daily files, and year-to-date builds can replace earlier months. Retention begins when supersession is first detected; settings and timers survive restarts. Automatic deletion runs after a successful sync and reload, or a successful manual reload. Expired files remain until the next successful run or manual deletion.</p>
+            <dl class="schedule-facts">
+              <div><dt>Superseded filters</dt><dd id="cleanup-count">—</dd></div>
+              <div><dt>Total file size</dt><dd id="cleanup-size">—</dd></div>
+            </dl>
+            <p class="section-copy">Delete superseded filters now, even if automatic deletion is off or their retention period has not ended. Active filters, files awaiting reload, and date ranges without full replacement coverage are protected. This cannot be undone.</p>
+            <div class="schedule-actions">
+              <button id="cleanup-delete" class="action-button action-button--amber" type="button" disabled>Delete superseded filters</button>
+              <button id="cleanup-files-refresh" class="action-button action-button--secondary" type="button">Refresh file totals</button>
+            </div>
+            <p id="cleanup-files-message" class="status" aria-live="polite"></p>
+          </div>
+        </section>
+
         <section class="metrics-grid sync-metrics-grid">
           <article id="sync-progress-section" class="surface-card progress-card">
             <div class="surface-card__inner">
@@ -162,6 +203,6 @@
   </main>
 
   <script src="/ui-assets/log-window.js?v=20260920b" defer></script>
-  <script src="/ui-sync/app.js?v=20260922a" defer></script>
+  <script src="/ui-sync/app.js?v=20261031a" defer></script>
 </body>
 </html>
