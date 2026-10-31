@@ -156,6 +156,21 @@ code {
   overflow: hidden;
 }
 
+/* Tall, live-updating pages should not blur the backdrop on every scroll. */
+.operational-page .workspace-panel {
+  backdrop-filter: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    #101b1b;
+}
+
+.operational-page .operational-window pre {
+  min-width: 0;
+  contain: content;
+  overflow-anchor: none;
+  scroll-behavior: auto;
+}
+
 .workspace-header {
   display: grid;
   gap: 1.5rem;

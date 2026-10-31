@@ -136,6 +136,9 @@ def test_partial_reload_preserves_previous_manager_and_files(setup_cleanup, monk
     monkeypatch.setattr(api, "filter_manager", previous)
     monkeypatch.setattr(api, "filter_cleanup", cleanup)
     monkeypatch.setattr(api, "FilterManager", lambda **kwargs: candidate)
+    monkeypatch.setattr(api.activation, "load_candidate", lambda current: (
+        Path("candidate.json"), {"filters": [str(new)], "verified_files": {}}, True))
+    monkeypatch.setattr(api.activation, "check_identities", lambda payload: None)
     result = api._run_filter_reload_with_logs()
     assert not result.success
     assert api.filter_manager is previous
@@ -161,6 +164,11 @@ def test_successful_reload_closes_old_mappings_before_immediate_cleanup(setup_cl
     monkeypatch.setattr(api, "filter_manager", previous)
     monkeypatch.setattr(api, "filter_cleanup", cleanup)
     monkeypatch.setattr(api, "FilterManager", lambda **kwargs: candidate)
+    monkeypatch.setattr(api.activation, "load_candidate", lambda current: (
+        Path("candidate.json"), {"filters": [str(new)], "verified_files": {}}, True))
+    monkeypatch.setattr(api.activation, "check_identities", lambda payload: None)
+    monkeypatch.setattr(api.activation, "validate_groups", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(api.activation, "inspect_retained_groups", lambda *args: None)
     monkeypatch.setattr(api, "_cleanup_protected_paths", lambda: [new])
     monkeypatch.delenv("HUSHFILTER_TEST_MODE", raising=False)
     result = api._run_filter_reload_with_logs()

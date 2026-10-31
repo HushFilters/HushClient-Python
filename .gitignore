@@ -8,6 +8,10 @@ filters/manifest_current.json
 filters/.auto_update_state.json
 filters/.cleanup_state.json
 filters/.cleanup_state.tmp
+filters/.active_manifest.json
+filters/.pending_manifest.json
+filters/.*.tmp
+filters/.generations/
 manifest.json
 .codex
 tls/

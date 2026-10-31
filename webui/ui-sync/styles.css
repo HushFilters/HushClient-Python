@@ -330,8 +330,7 @@
 }
 
 #sync-output {
-  min-height: 16rem;
-  max-height: 32rem;
+  height: clamp(16rem, 50vh, 32rem);
   overflow: auto;
 }
 

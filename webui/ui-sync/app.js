@@ -1,7 +1,14 @@
+function setText(id, value) {
+  const element = document.getElementById(id);
+  const text = String(value);
+  if (element.textContent !== text) element.textContent = text;
+}
+
 function setStatus(message, variant = "") {
   const el = document.getElementById("sync-status");
-  el.textContent = message;
-  el.className = `status ${variant}`.trim();
+  setText("sync-status", message);
+  const className = `status ${variant}`.trim();
+  if (el.className !== className) el.className = className;
 }
 
 function prettyJson(value) {
@@ -9,7 +16,7 @@ function prettyJson(value) {
 }
 
 function setMetric(id, value) {
-  document.getElementById(id).textContent = String(value);
+  setText(id, value);
 }
 
 async function refreshLoadedCount() {
@@ -27,7 +34,6 @@ async function refreshLoadedCount() {
 
 function renderOutput(payload) {
   renderProgress(payload);
-  const output = document.getElementById("sync-output");
   const lines = [];
 
   if (payload.detail) {
@@ -41,7 +47,7 @@ function renderOutput(payload) {
     lines.push(...payload.logs);
   }
 
-  output.textContent = lines.length > 0 ? lines.join("\n") : prettyJson(payload);
+  setText("sync-output", lines.length > 0 ? lines.join("\n") : prettyJson(payload));
 }
 
 function setButtonsDisabled(disabled) {
@@ -135,7 +141,11 @@ function historyOutcome(run) {
   return outcomes.join(" · ");
 }
 
+let lastHistorySignature = null;
 function renderAutoUpdateHistory(history, activeRun = null) {
+  const signature = JSON.stringify([history, activeRun]);
+  if (signature === lastHistorySignature) return;
+  lastHistorySignature = signature;
   const container = document.getElementById("auto-update-history");
   container.replaceChildren();
 
@@ -212,12 +222,13 @@ function syncAutoUpdateHourAvailability() {
 }
 
 function renderAutoUpdateStatus(payload, applyFormValues = true) {
-  document.getElementById("machine-id").textContent = payload.machine_id || "Unavailable (no hardware MAC detected)";
-  document.getElementById("retry-status").textContent = payload.retry_at
-    ? `Next retry: ${formatScheduledTime(payload.retry_at)}. Retry window ends: ${formatScheduledTime(payload.retry_until)}.` : "";
+  setText("machine-id", payload.machine_id || "Unavailable (no hardware MAC detected)");
+  setText("retry-status", payload.retry_at
+    ? `Next retry: ${formatScheduledTime(payload.retry_at)}. Retry window ends: ${formatScheduledTime(payload.retry_until)}.` : "");
   const badge = document.getElementById("auto-update-badge");
-  badge.textContent = payload.active ? "Running" : (payload.enabled ? "Enabled" : "Disabled");
-  badge.className = `schedule-badge ${(payload.enabled || payload.active) ? "schedule-badge--enabled" : ""}`.trim();
+  setText("auto-update-badge", payload.active ? "Running" : (payload.enabled ? "Enabled" : "Disabled"));
+  const badgeClass = `schedule-badge ${(payload.enabled || payload.active) ? "schedule-badge--enabled" : ""}`.trim();
+  if (badge.className !== badgeClass) badge.className = badgeClass;
 
   if (applyFormValues) {
     document.getElementById("auto-update-enabled").checked = payload.enabled === true;
@@ -227,9 +238,9 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
     syncAutoUpdateHourAvailability();
   }
 
-  document.getElementById("auto-update-next").textContent = formatNextScheduledTime(payload.next_update_at);
-  document.getElementById("auto-update-timezone").textContent = payload.timezone || "—";
-  document.getElementById("auto-update-current-time").textContent = formatScheduledTime(payload.current_time);
+  setText("auto-update-next", formatNextScheduledTime(payload.next_update_at));
+  setText("auto-update-timezone", payload.timezone || "—");
+  setText("auto-update-current-time", formatScheduledTime(payload.current_time));
   const activeRun = payload.active ? {
     triggered_at: payload.active_since,
     completed_at: payload.current_time,
@@ -264,7 +275,10 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
   }
 }
 
+let schedulePollBusy = false;
 async function refreshAutoUpdateStatus() {
+  if (schedulePollBusy || document.hidden) return;
+  schedulePollBusy = true;
   try {
     const response = await fetch("/sync/auto-update", { cache: "no-store" });
     const payload = await readResponsePayload(response);
@@ -275,7 +289,7 @@ async function refreshAutoUpdateStatus() {
     renderAutoUpdateStatus(payload, !autoUpdateFormDirty);
   } catch (err) {
     setAutoUpdateMessage(err instanceof Error ? err.message : String(err), "bad");
-  }
+  } finally { schedulePollBusy = false; }
 }
 
 async function saveAutoUpdateSchedule(event) {
@@ -318,7 +332,6 @@ let localOperationRunning = false;
 
 function renderStatusLogs(payload) {
   renderProgress(payload);
-  const output = document.getElementById("sync-output");
   const lines = [];
 
   if (payload.operation) {
@@ -331,7 +344,7 @@ function renderStatusLogs(payload) {
   }
 
   if (lines.length > 0) {
-    output.textContent = lines.join("\n");
+    setText("sync-output", lines.join("\n"));
   }
 }
 
@@ -751,7 +764,7 @@ function renderProgress(payload) {
   summary.textContent = payload.active ? 'Operation in progress' : (payload.success === true ? 'Operation complete' : (payload.success === false ? 'Operation failed' : 'No operation started yet.'));
   const container = document.getElementById('sync-progress');
   container.replaceChildren();
-  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Extract filters', verify: 'Verify checksums', manifest: 'Update local manifest', reload: 'Reload filters' };
+  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Stage incoming filters', verify: 'Verify checksums', manifest: 'Prepare candidate manifest', validate: 'Validate all shards and four test credentials', reload: 'Activate validated filters' };
   const statuses = { pending: 'Waiting', running: 'In progress', complete: 'Complete', failed: 'Failed', skipped: 'Not needed' };
   payload.progress.forEach(phase => {
     const row = document.createElement('div');

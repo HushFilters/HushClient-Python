@@ -52,6 +52,13 @@ def isolate_auto_update_state(monkeypatch, tmp_path: Path) -> None:
     # These endpoint tests do not exercise filesystem discovery. Its background
     # startup and concurrency behavior have dedicated inventory-job tests.
     monkeypatch.setattr(api, "_initialize_filter_cleanup", lambda: {})
+    monkeypatch.setattr(api.activation, "stage_sync", lambda sync, paths: sync())
+    monkeypatch.setattr(api.activation, "load_candidate", lambda current: (
+        Path("manifest.json"), {"filters": ["filters/new.hf"]}, False))
+    monkeypatch.setattr(api.activation, "verify_manual_manifest", lambda payload, progress: payload)
+    monkeypatch.setattr(api.activation, "check_identities", lambda payload: None)
+    monkeypatch.setattr(api.activation, "validate_groups", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(api.activation, "inspect_retained_groups", lambda *args: None)
 
 
 def test_root_and_ui_endpoints(monkeypatch) -> None:
@@ -310,9 +317,9 @@ def test_update_manifest_endpoint_returns_logs(monkeypatch, tmp_path: Path) -> N
     payload = response.json()
     assert payload["success"] is True
     assert payload["test_mode"] is False
-    assert payload["output_file"] == "manifest.json"
+    assert payload["output_file"] == str(api.activation.pending_path())
     assert payload["filter_count"] == 2
-    assert payload["logs"] == ["Generated manifest.json with 2 filters"]
+    assert payload["logs"] == [f"Generated {api.activation.pending_path()} with 2 filters"]
 
 
 def test_reload_filters_endpoint_swaps_manager(monkeypatch) -> None:
@@ -349,8 +356,9 @@ def test_reload_filters_endpoint_swaps_manager(monkeypatch) -> None:
     assert payload["filter_count"] == 1
     assert payload["filters"] == ["filters/new.hf"]
     assert payload["logs"] == [
-        "INFO loaded 1 filters from manifest.json",
-        "INFO closed previous filter mappings",
+        "INFO candidate validated: 1 groups; all four test credentials passed in every group",
+        "INFO activated 1 validated filters",
+        "INFO drained existing requests and closed previous filter mappings",
     ]
     assert startup_manager.closed is True
     assert len(ReloadableFilterManager.created) >= 2

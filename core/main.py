@@ -122,6 +122,11 @@ class HushFilter:
         """Set boundaries for filter data based on header."""
         self.filter_start = self.header['foffset']
         self.filter_end = self.header['foffset'] + self.header['fsize']
+        header_end = 30 + self.header['fpsize'] + 2 + self.header['sasize'] + 6 + len(self.header['siglist'])
+        if (self.header['ftype'] != 1 or self.nbits <= 0 or self.nk <= 0
+                or self.filter_start < header_end or self.filter_end > len(self.mm)
+                or self.header['fsize'] < (self.nbits + 7) // 8):
+            raise HushFilterError("Invalid Bloom filter parameters or data bounds")
     
     def chunk_data(self, chunk_size: int) -> list:
         """Divide filter data into chunks of specified size; last chunk may be smaller."""

@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
-  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260922b">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261029b">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20261101b">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261101b">
 </head>
-<body>
+<body class="operational-page">
   <main class="workspace-shell">
     <section class="workspace-panel">
       {{TEST_MODE_BANNER}}
@@ -49,14 +49,14 @@
               <section class="sync-action-block sync-action-block--primary">
                 <p class="section-eyebrow">Primary Action</p>
                 <h2 class="sync-section-heading">Apply Latest Filters</h2>
-                <p class="section-copy">Run filter sync, update <code>manifest.json</code>, and reload the application with the new filters in one sequential operation.</p>
+                <p class="section-copy">Stage and verify replacement filters, validate all 256 shards and four test credentials in every group, then safely activate the new filters. Existing requests finish using their original filters.</p>
                 <button id="apply-button" class="action-button" type="button">sync, update manifest, and reload filters</button>
               </section>
 
               <section class="sync-action-block">
                 <p class="section-eyebrow">Manual Steps</p>
                 <h2 class="sync-section-heading">Manual Steps</h2>
-                <p class="section-copy">Run the filter sync workflow one step at a time when you want to inspect or repeat a specific stage.</p>
+                <p class="section-copy">Run the workflow one step at a time. Sync and manifest preparation leave the active filters in place; reload validates the candidate before activating it.</p>
                 <div class="sync-actions-grid">
                   <button id="sync-button" class="action-button action-button--secondary" type="button">sync filters from nWebbed</button>
                   <button id="manifest-button" class="action-button action-button--amber" type="button">update manifest</button>
@@ -202,7 +202,7 @@
     </section>
   </main>
 
-  <script src="/ui-assets/log-window.js?v=20260920b" defer></script>
-  <script src="/ui-sync/app.js?v=20261031a" defer></script>
+  <script src="/ui-assets/log-window.js?v=20261101b" defer></script>
+  <script src="/ui-sync/app.js?v=20261101b" defer></script>
 </body>
 </html>

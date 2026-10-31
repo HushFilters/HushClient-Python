@@ -20,6 +20,12 @@ async function request(url, init = {}) {
 
 let loadedSettings = false;
 let refreshing = false;
+
+function setText(id, value) {
+  const element = document.getElementById(id);
+  if (element.textContent !== value) element.textContent = value;
+}
+
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
@@ -27,10 +33,10 @@ async function refresh() {
   button.disabled = true;
   try {
     const payload = await request('/logs');
-    document.getElementById('log-size').textContent =
-      `Total retained size: ${payload.size_bytes.toLocaleString()} bytes (${(payload.size_bytes / 1048576).toFixed(2)} MiB). Retention: up to ${payload.max_size_bytes / 1073741824} GiB across one active log and three rotated backups.`;
-    document.getElementById('log-output').textContent = payload.text || 'No log entries.';
-    logStatus.textContent = payload.truncated ? 'Showing the latest 256 KiB. Download to view all retained logs.' : 'Showing all retained logs.';
+    setText('log-size',
+      `Total retained size: ${payload.size_bytes.toLocaleString()} bytes (${(payload.size_bytes / 1048576).toFixed(2)} MiB). Retention: up to ${payload.max_size_bytes / 1073741824} GiB across one active log and three rotated backups.`);
+    setText('log-output', payload.text || 'No log entries.');
+    setText('log-status', payload.truncated ? 'Showing the latest 256 KiB. Download to view all retained logs.' : 'Showing all retained logs.');
     if (!loadedSettings) {
       options.forEach(input => { input.checked = payload.settings[input.name] === true; });
       off.checked = !options.some(input => input.checked);
