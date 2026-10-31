@@ -30,8 +30,10 @@ from diagnostic_logs import LogSettings, install_logging, uninstall_logging
 from alerts import AlertManager, AlertSettings
 from certificates import alert_certificate_issues, inspect_certificates
 from filter_sync import progress as sync_progress
+from filter_sync.cleanup import CleanupSettings, FilterCleanup
+from filter_sync.inventory_job import InventoryJob
 from fastapi.openapi.docs import get_swagger_ui_html
-from helpers.generate_manifest import generate_manifest
+from helpers.generate_manifest import generate_manifest, _build_location_map, _resolve_manifest_filter_path
 
 
 # Global filter manager
@@ -41,6 +43,8 @@ logger = logging.getLogger("uvicorn.error")
 sync_logger = logging.getLogger("hushclient.sync")
 diagnostic_logs = None
 alert_manager: AlertManager | None = None
+filter_cleanup: FilterCleanup | None = None
+cleanup_inventory_job = InventoryJob()
 CERTIFICATE_CHECK_INTERVAL_SECONDS = 3600
 AUTO_UPDATE_RETRY_SECONDS = 300
 AUTO_UPDATE_RETRY_WINDOW_SECONDS = 3600
@@ -240,7 +244,9 @@ async def lifespan(app: FastAPI):
     auto_update_task: asyncio.Task[None] | None = None
     certificate_task: asyncio.Task[None] | None = None
     
-    global diagnostic_logs, alert_manager
+    global diagnostic_logs, alert_manager, filter_cleanup, cleanup_inventory_job
+    cleanup_inventory_job = InventoryJob()
+    filter_cleanup = None
     diagnostic_logs, attached = install_logging()
     alert_manager = AlertManager(Path(os.getenv("HUSHCLIENT_ALERT_SETTINGS_PATH", "filters/.alerts.json")))
     alert_manager.start()
@@ -286,11 +292,15 @@ async def lifespan(app: FastAPI):
             _notify_alert("filter_failure", "The client could not load filters during startup.")
             logger.exception("Error loading filters")
             raise
+        if not _is_test_mode_enabled():
+            cleanup_inventory_job.start(_initialize_filter_cleanup)
         _load_auto_update_state()
         _auto_update_wake_event = asyncio.Event()
         auto_update_task = asyncio.create_task(_auto_update_scheduler_loop())
         yield
     finally:
+        await asyncio.to_thread(cleanup_inventory_job.join)
+        filter_cleanup = None
         if certificate_task is not None:
             certificate_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -491,6 +501,10 @@ class SyncStatusResponse(ApiResponse):
     max_nk: int = 0
 
 
+class CleanupDeleteRequest(BaseModel):
+    confirmation_token: str = Field(min_length=64, max_length=64)
+
+
 class AutoUpdateConfigRequest(BaseModel):
     """Runtime configuration for the daily automatic update."""
     enabled: bool
@@ -560,6 +574,9 @@ async def endpoints():
             "sync_apply": "/sync/apply",
             "sync_status": "/sync/status",
             "auto_update": "/sync/auto-update",
+            "filter_cleanup": "/sync/cleanup",
+            "superseded_filters": "/sync/cleanup/files",
+            "delete_superseded_filters": "/sync/cleanup/delete",
             "update_manifest": "/sync/manifest",
             "reload_filters": "/sync/reload",
         }
@@ -989,6 +1006,106 @@ async def auto_update_status_endpoint():
     return AutoUpdateStatusResponse(**_auto_update_status_snapshot())
 
 
+@app.get("/sync/cleanup", response_model=CleanupSettings, tags=["Sync"])
+async def get_filter_cleanup_settings():
+    if filter_cleanup is None:
+        raise HTTPException(status_code=503, detail="Filter cleanup is unavailable (or test mode is enabled)")
+    return filter_cleanup.settings
+
+
+@app.put("/sync/cleanup", response_model=CleanupSettings, tags=["Sync"])
+async def configure_filter_cleanup(settings: CleanupSettings):
+    if filter_cleanup is None:
+        raise HTTPException(status_code=503, detail="Filter cleanup is unavailable (or test mode is enabled)")
+    if not operation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A filter operation is in progress; try again when it finishes")
+    try:
+        await run_in_threadpool(filter_cleanup.configure, settings)
+        return filter_cleanup.settings
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not save filter cleanup settings") from exc
+    finally:
+        operation_lock.release()
+
+
+def _initialize_filter_cleanup() -> dict:
+    """Initialize and discover existing files without delaying application readiness."""
+    global filter_cleanup
+    if not operation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A filter operation is running. Refresh file totals when it finishes.")
+    try:
+        cleanup = FilterCleanup(Path("filters"), Path(os.getenv(
+            "HUSHCLIENT_FILTER_CLEANUP_STATE_PATH", "filters/.cleanup_state.json")))
+        filter_cleanup = cleanup
+        scan = cleanup.scan()
+        count = len(filter_manager.filters) if filter_manager else 0
+        if count and count == getattr(filter_manager, "_requested_filter_count", count):
+            cleanup.loaded((path for path, _ in filter_manager.filters), scan=scan)
+        return cleanup.inventory(_cleanup_protected_paths() if cleanup.retired else [], scan=scan)
+    finally:
+        operation_lock.release()
+
+
+def _inspect_or_delete_superseded_filters(confirmation_token: str | None = None, *, wait: bool = False) -> dict:
+    if not operation_lock.acquire(blocking=wait):
+        raise HTTPException(status_code=409, detail="A filter operation is in progress; try again when it finishes")
+    try:
+        cleanup = filter_cleanup
+        if cleanup is None or _is_test_mode_enabled():
+            raise HTTPException(status_code=503, detail="Filter cleanup is unavailable (or test mode is enabled)")
+        protected = _cleanup_protected_paths()
+        count = len(filter_manager.filters) if filter_manager else 0
+        complete = count and count == getattr(filter_manager, "_requested_filter_count", count)
+        scan = cleanup.scan()
+        if complete:
+            cleanup.loaded((path for path, _ in filter_manager.filters), scan=scan)
+        inventory = cleanup.inventory(protected, scan=scan)
+        if confirmation_token is None:
+            return inventory
+        if not complete:
+            raise HTTPException(status_code=409, detail="A complete filter load is required before deleting superseded filters")
+        if confirmation_token != inventory["confirmation_token"]:
+            raise HTTPException(status_code=409, detail="Superseded filters have changed. Refresh and confirm deletion again.")
+        sizes = {name: entry["identity"][0] for name, entry in cleanup.retired.items()}
+        deleted = cleanup.cleanup(protected, manual=True)
+        remaining = cleanup.inventory(protected)
+        return {**remaining, "deleted_count": len(deleted),
+                "deleted_bytes": sum(sizes[name] for name in deleted)}
+    except (OSError, ValueError, KeyError, TypeError):
+        sync_logger.exception("Could not inspect or delete superseded filters")
+        raise HTTPException(status_code=500, detail="Could not inspect or delete superseded filters. Refresh and check diagnostic logs.") from None
+    finally:
+        operation_lock.release()
+
+
+@app.get("/sync/cleanup/files", tags=["Sync"])
+async def get_superseded_filter_inventory():
+    return await run_in_threadpool(_inspect_or_delete_superseded_filters)
+
+
+@app.post("/sync/cleanup/files/refresh", status_code=202, tags=["Sync"])
+async def refresh_superseded_filter_inventory():
+    """Start or reuse a background scan; never scan on the request/event-loop thread."""
+    if cleanup_inventory_job.snapshot()["active"]:
+        return cleanup_inventory_job.snapshot()
+    if _is_test_mode_enabled():
+        raise HTTPException(status_code=503, detail="Filter cleanup is unavailable (or test mode is enabled)")
+    cleanup_inventory_job.start(_initialize_filter_cleanup if filter_cleanup is None
+                                else lambda: _inspect_or_delete_superseded_filters(wait=True))
+    return cleanup_inventory_job.snapshot()
+
+
+@app.get("/sync/cleanup/files/status", tags=["Sync"])
+async def superseded_filter_inventory_status():
+    return cleanup_inventory_job.snapshot()
+
+
+@app.post("/sync/cleanup/delete", tags=["Sync"])
+async def delete_superseded_filters(request: CleanupDeleteRequest):
+    """Delete the confirmed set of superseded filters, regardless of retention settings."""
+    return await run_in_threadpool(_inspect_or_delete_superseded_filters, request.confirmation_token)
+
+
 @app.put("/sync/auto-update", response_model=AutoUpdateStatusResponse, tags=["Sync"])
 async def update_auto_update_config_endpoint(request: AutoUpdateConfigRequest):
     """Enable, disable, or reschedule automatic updates without restarting the API."""
@@ -1245,6 +1362,9 @@ def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
     try:
         manifest_path = _current_filter_configuration()
         new_manager = FilterManager(manifest_path=manifest_path)
+        if len(new_manager.filters) != getattr(new_manager, "_requested_filter_count", len(new_manager.filters)):
+            new_manager.close()
+            raise RuntimeError("Some configured filters could not be loaded; keeping previous filters active")
         logs.append(f"INFO loaded {len(new_manager.filters)} filters from {manifest_path}")
 
         old_manager = filter_manager
@@ -1254,6 +1374,7 @@ def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
             logs.append("INFO closed previous filter mappings")
 
         _check_loaded_filters()
+        _record_loaded_filter_cleanup()
         stats = new_manager.get_stats()
         return ReloadFiltersResponse(
             success=True,
@@ -1269,6 +1390,36 @@ def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
             logs=logs,
             detail=f"Failed to reload filters: {exc}",
         )
+
+
+def _cleanup_protected_paths() -> list[str]:
+    """Protect loaded filters and files selected for a pending manual reload/sync."""
+    paths = [path for path, _ in filter_manager.filters] if filter_manager else []
+    manifest_path = Path(_current_filter_configuration())
+    if manifest_path.exists():
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        paths.extend(data["filters"])
+    remote_path = Path("filters/manifest_current.json")
+    if remote_path.exists():
+        data = json.loads(remote_path.read_text(encoding="utf-8"))
+        location_map = _build_location_map(data.get("current_filter_locations", []))
+        paths.extend(str(Path("filters") / _resolve_manifest_filter_path(
+            entry["path"], location_map=location_map)) for entry in data["current_filter_files"])
+    return paths
+
+
+def _record_loaded_filter_cleanup(*, delete_expired: bool = True) -> None:
+    if filter_cleanup is None or filter_manager is None or _is_test_mode_enabled():
+        return
+    count = len(filter_manager.filters)
+    if not count or count != getattr(filter_manager, "_requested_filter_count", count):
+        return
+    try:
+        filter_cleanup.loaded(path for path, _ in filter_manager.filters)
+        if delete_expired:
+            filter_cleanup.cleanup(_cleanup_protected_paths())
+    except Exception:
+        sync_logger.exception("Filter cleanup deferred; loaded filters remain available")
 
 
 def _current_filter_configuration() -> str:

@@ -49,6 +49,9 @@ class DummyFilterManager:
 def isolate_auto_update_state(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HUSHCLIENT_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update-state.json"))
+    # These endpoint tests do not exercise filesystem discovery. Its background
+    # startup and concurrency behavior have dedicated inventory-job tests.
+    monkeypatch.setattr(api, "_initialize_filter_cleanup", lambda: {})
 
 
 def test_root_and_ui_endpoints(monkeypatch) -> None:

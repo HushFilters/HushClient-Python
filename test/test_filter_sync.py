@@ -345,8 +345,12 @@ def test_sync_filters_logs_and_stops_on_zip_md5_mismatch(
         },
     )
 
+    previous_manifest = tmp_path / "filters" / "manifest_current.json"
+    previous_manifest.parent.mkdir(exist_ok=True)
+    previous_manifest.write_text("previous verified manifest")
     with pytest.raises(SyncError, match="MD5 mismatch"):
         sync_filters(base_dir=base_dir, downloader=downloader)
+    assert previous_manifest.read_text() == "previous verified manifest"
 
     assert downloader.text_requests == [
         "filters/manifest_current.json",
@@ -407,6 +411,7 @@ def test_sync_filters_logs_filter_verification_failures(
 
     with pytest.raises(SyncError, match="Filter MD5 mismatch"):
         sync_filters(base_dir=base_dir, downloader=downloader)
+    assert not (tmp_path / "filters" / "manifest_current.json").exists()
 
     assert downloader.text_requests == [
         "filters/manifest_current.json",

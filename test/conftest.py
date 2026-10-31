@@ -7,3 +7,4 @@ def isolate_alert_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("HUSHCLIENT_ALERT_SETTINGS_PATH", str(tmp_path / "alerts.json"))
 
     monkeypatch.setenv("HUSHCLIENT_TLS_MONITOR", "0")
+    monkeypatch.setenv("HUSHCLIENT_FILTER_CLEANUP_STATE_PATH", str(tmp_path / "cleanup.json"))

@@ -216,9 +216,19 @@
   padding-inline: 0.75rem;
 }
 
-#auto-update-message {
+#auto-update-message,
+#cleanup-message {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+#cleanup-days-field[hidden] {
+  display: none;
+}
+
+#cleanup-message:empty,
+#cleanup-files-message:empty {
+  display: none;
 }
 
 .schedule-facts {

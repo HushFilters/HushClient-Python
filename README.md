@@ -141,6 +141,26 @@ The [Filter Sync UI](https://localhost/ui-sync/) can enable or disable automatic
 
 UI changes are saved in `filters/.auto_update_state.json` and take precedence over environment defaults on later starts. The Docker filters volume preserves this state when the API container is recreated. Delete that state file to return to the `AUTO_UPDATE_FILTERS` and `AUTO_UPDATE_TIME` defaults.
 
+### Superseded filter cleanup
+
+The cleanup panel shows the count and combined file size of superseded filters currently eligible for manual deletion, including dated files already on disk before cleanup was enabled. Totals refresh when the page opens, after sync operations complete, and on demand; there is no periodic cleanup scan. **Delete superseded filters** fetches current totals and asks “Are you sure?” before permanently deleting them, regardless of the automatic cleanup setting or remaining retention time. Active filters, pending reload files, changed files, and ranges without full replacement coverage are excluded. If the confirmed set changes, refresh and confirm again. The result reports the number and size deleted, plus any files remaining after deletion failures.
+
+The UI starts or joins a background scan using `POST /sync/cleanup/files/refresh` (HTTP 202), then polls `GET /sync/cleanup/files/status` only while it is active. Status reads return cached data without scanning the filesystem. Previous totals remain visible, and duplicate refreshes share one scan. Scans wait for any current filter operation to finish.
+
+Discovery compares coverage by build folder before enumerating candidate files. Folders without replacement coverage are skipped. Within one scan, directory safety checks, listings, and file metadata are shared between discovery and totals calculation; candidate sizes are read once from metadata, without reading filter contents. This snapshot is discarded after the scan. Deletion always performs fresh path and file-identity checks.
+
+The synchronous API `GET /sync/cleanup/files` remains available and returns `filter_count`, `total_bytes`, and a `confirmation_token` for the current set. After confirmation, `POST /sync/cleanup/delete` accepts `{"confirmation_token": "<token>"}`. A stale token or concurrent filter operation returns HTTP 409; no files are deleted in those cases. Manual deletion requires a complete, nonempty loaded filter set.
+
+On **Filter Synchronization**, use **Superseded Filter Cleanup** to choose immediate deletion after replacement filters successfully load, retention for **1–31 days**, or **Off** for manual deletion. The default is **31 days**. Retention starts when the old filter is superseded; repeated syncs do not extend it.
+
+Cleanup discovers dated `.hf` files inside `filters/YYYYMM/YYYYMMDD_YYYYMMDD/`, with filenames `hh_YYYYMMDD_YYYYMMDD.hf`. A file is superseded only when successfully loaded filters for the same hash shard cover its entire date range. For example, `20260101_20261001` replaces earlier 2026 year-to-date, weekly, and daily ranges ending on or before October 1, but not the historic range ending January 1. Adjacent loaded ranges may jointly cover an older range; gaps or a missing shard prevent retirement. Previously tracked dated files are re-evaluated against current coverage. Custom undated filters retain previous-load tracking; unfamiliar untracked files are left alone.
+
+For existing superseded files with no recorded retirement time, retention starts when coverage is first detected after a complete load, not at the date encoded in the filename or the file modification time. Active files, files selected for a pending reload, and files changed since retirement are protected. Failed or incomplete reloads keep the previous filters active and do not retire them. The downloaded manifest is published only after sync verification completes, and manifest generation fails if a listed filter is missing.
+
+Automatic cleanup runs at the end of a successful sync/apply sequence, after all replacement filters have loaded, and after a successful standalone manual reload. There is no background cleanup timer. Startup records loaded filters and discovers superseded files in a background job without deleting them or delaying API health/readiness. Expired files and failed deletions wait for the next successful sync/reload or a confirmed manual deletion; retention is therefore a minimum age, not an exact deletion deadline. Disabling cleanup preserves retirement timestamps; re-enabling it or shortening retention takes effect at the next successful sync/reload. Cleanup is disabled in test mode. The standalone download CLI does not delete superseded filters because it does not load their replacements.
+
+Settings and retirement timestamps persist in `filters/.cleanup_state.json`, covered by the Docker filters volume. Override its location with `HUSHCLIENT_FILTER_CLEANUP_STATE_PATH`. If this file cannot be read safely, automatic cleanup stays unavailable and the error is logged. `GET /sync/cleanup` reads settings; `PUT /sync/cleanup` accepts `{"enabled": true, "retention_days": 31}`. Set `retention_days` to `0` for immediate deletion, or `enabled` to `false` to disable deletion.
+
 ### API credential checks
 
 The client fetches R2 credentials from `NWEBBED_API_URL` using `GET` with the header `Authorization: HFKey <NWEBBED_API_KEY>`.
@@ -480,7 +500,7 @@ Response:
 Regenerates `manifest.json` from the local `filters/` tree using `helpers/generate_manifest.py`.
 
 ### `POST /sync/reload`
-Closes existing filter mappings and loads files from the current `manifest.json` into memory without restarting the API process.
+Loads files from the configured manifest without restarting the API process. A complete load replaces the active manager and closes its previous mappings; incomplete loads keep the previous manager. Superseded filters then follow the configured cleanup policy.
 
 ### `POST /check`
 Request:

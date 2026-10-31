@@ -14,6 +14,7 @@ build/
 tls/
 venv/
 .venv/
+.cache/
 *.txt.bak
 test_*.tsv
 debug_*.py
@@ -25,3 +26,5 @@ logs/
 # SMTP alert credentials and atomic settings writes
 filters/.alerts.json
 filters/.alerts-*.tmp
+filters/.cleanup_state.json
+filters/.cleanup_state.tmp

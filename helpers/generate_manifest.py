@@ -65,8 +65,7 @@ def _filter_paths_from_manifest_current(filters_path: Path) -> list[str] | None:
         )
         full_path = filters_path / Path(*relative_path.parts)
         if not full_path.exists():
-            logger.warning("Skipping missing manifest-listed filter file: %s", full_path)
-            continue
+            raise ValueError(f"Missing manifest-listed filter file: {full_path}")
         filter_paths.append(_to_manifest_path(full_path, filters_path))
 
     return sorted(filter_paths)

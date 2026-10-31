@@ -258,6 +258,7 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
         completedRun.status === "success" ? "ok" : "bad",
       );
       void refreshLoadedCount();
+      void refreshCleanupInventory();
     }
     autoUpdateWasActive = false;
   }
@@ -453,6 +454,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     localOperationRunning = false;
     setButtonsDisabled(false);
     await pollLiveStatus();
+    await refreshCleanupInventory();
   }
 }
 
@@ -495,10 +497,18 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     localOperationRunning = false;
     setButtonsDisabled(false);
     await pollLiveStatus();
+    await refreshCleanupInventory();
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  void loadCleanupSettings();
+  void refreshCleanupInventory();
+  document.getElementById("cleanup-delete").addEventListener("click", deleteSupersededFilters);
+  document.getElementById("cleanup-files-refresh").addEventListener("click", () => { void refreshCleanupInventory(); });
+  document.getElementById("cleanup-mode").addEventListener("change", syncCleanupDaysAvailability);
+  document.getElementById("cleanup-form").addEventListener("submit", saveCleanupSettings);
+  document.getElementById("cleanup-refresh").addEventListener("click", loadCleanupSettings);
   startLiveLogPolling();
   refreshLoadedCount();
   void refreshAutoUpdateStatus();
@@ -563,6 +573,173 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   });
 });
+
+let cleanupInventory = null;
+let cleanupDeleteRunning = false;
+
+function formatFilterBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
+  return `${value.toFixed(2)} ${units[index]}`;
+}
+
+function showCleanupInventory(inventory) {
+  cleanupInventory = inventory;
+  document.getElementById("cleanup-count").textContent = inventory.filter_count.toLocaleString();
+  document.getElementById("cleanup-size").textContent = `${formatFilterBytes(inventory.total_bytes)} (${inventory.total_bytes.toLocaleString()} bytes)`;
+  document.getElementById("cleanup-delete").disabled = cleanupDeleteRunning || inventory.filter_count === 0;
+}
+
+let cleanupRefreshPromise = null;
+
+function refreshCleanupInventory() {
+  if (!cleanupRefreshPromise) {
+    cleanupRefreshPromise = runCleanupInventoryRefresh().finally(() => {
+      cleanupRefreshPromise = null;
+    });
+  }
+  return cleanupRefreshPromise;
+}
+
+async function runCleanupInventoryRefresh() {
+  const message = document.getElementById("cleanup-files-message");
+  const refresh = document.getElementById("cleanup-files-refresh");
+  const deleteButton = document.getElementById("cleanup-delete");
+  refresh.disabled = true;
+  refresh.textContent = "Scanning…";
+  deleteButton.disabled = true;
+  message.textContent = "Scanning superseded filters in the background (waiting if a filter operation is running). Previous totals remain visible.";
+  message.className = "status";
+  try {
+    let response = await fetch("/sync/cleanup/files/refresh", { method: "POST" });
+    let status = await readResponsePayload(response);
+    if (!response.ok) throw new Error(status.detail || "Could not start file totals scan");
+    while (status.active) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      response = await fetch("/sync/cleanup/files/status", { cache: "no-store" });
+      status = await readResponsePayload(response);
+      if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
+    }
+    if (status.error) throw new Error(status.error);
+    if (!status.inventory) throw new Error("No file totals returned. Please refresh again.");
+    showCleanupInventory(status.inventory);
+    if (document.getElementById("cleanup-mode").disabled) void loadCleanupSettings();
+    message.textContent = "File totals refreshed.";
+    message.className = "status ok";
+    return status.inventory;
+  } catch (error) {
+    cleanupInventory = null;
+    // Keep the previous numbers visible, but never permit deletion using a stale token.
+    message.textContent = `${error.message || String(error)} Previous totals may be out of date.`;
+    message.className = "status bad";
+    return null;
+  } finally {
+    refresh.disabled = cleanupDeleteRunning;
+    refresh.textContent = "Refresh file totals";
+    deleteButton.disabled = cleanupDeleteRunning || !cleanupInventory || cleanupInventory.filter_count === 0;
+  }
+}
+
+async function deleteSupersededFilters() {
+  if (cleanupDeleteRunning) return;
+  cleanupDeleteRunning = true;
+  const button = document.getElementById("cleanup-delete");
+  const message = document.getElementById("cleanup-files-message");
+  button.disabled = true;
+  try {
+    const inventory = await refreshCleanupInventory();
+    if (!inventory) return;
+    if (!inventory.filter_count) {
+      message.textContent = "No superseded filters to delete.";
+      message.className = "status";
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to permanently delete ${inventory.filter_count.toLocaleString()} superseded filter files (${formatFilterBytes(inventory.total_bytes)})? This cannot be undone.`)) return;
+    const response = await fetch("/sync/cleanup/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation_token: inventory.confirmation_token }),
+    });
+    const result = await readResponsePayload(response);
+    if (!response.ok) throw new Error(result.detail || "Could not delete superseded filters");
+    showCleanupInventory(result);
+    message.textContent = `Deleted ${result.deleted_count.toLocaleString()} superseded filters (${formatFilterBytes(result.deleted_bytes)}).`
+      + (result.filter_count ? ` ${result.filter_count.toLocaleString()} remain; check diagnostic logs and retry.` : "");
+    message.className = result.filter_count ? "status bad" : "status ok";
+  } catch (error) {
+    cleanupInventory = null;
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  } finally {
+    cleanupDeleteRunning = false;
+    document.getElementById("cleanup-files-refresh").disabled = false;
+    button.disabled = !cleanupInventory || cleanupInventory.filter_count === 0;
+  }
+}
+
+function syncCleanupDaysAvailability() {
+  const retained = document.getElementById("cleanup-mode").value === "retained";
+  document.getElementById("cleanup-days").disabled = !retained;
+  document.getElementById("cleanup-days-field").hidden = !retained;
+}
+
+function showCleanupSettings(settings) {
+  document.getElementById("cleanup-mode").value = !settings.enabled
+    ? "off" : (settings.retention_days === 0 ? "immediate" : "retained");
+  document.getElementById("cleanup-days").value = settings.retention_days || 31;
+  document.getElementById("cleanup-mode").disabled = false;
+  document.getElementById("cleanup-save").disabled = false;
+  syncCleanupDaysAvailability();
+}
+
+async function loadCleanupSettings() {
+  const message = document.getElementById("cleanup-message");
+  try {
+    const response = await fetch("/sync/cleanup");
+    const settings = await readResponsePayload(response);
+    if (!response.ok) throw new Error(settings.detail || "Could not load cleanup settings");
+    showCleanupSettings(settings);
+    message.textContent = "";
+    message.className = "status";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  }
+}
+
+async function saveCleanupSettings(event) {
+  event.preventDefault();
+  const mode = document.getElementById("cleanup-mode").value;
+  const days = Number(document.getElementById("cleanup-days").value);
+  const message = document.getElementById("cleanup-message");
+  if (mode === "retained" && (!Number.isInteger(days) || days < 1 || days > 31)) {
+    message.textContent = "Enter a whole number of days from 1 to 31.";
+    message.className = "status bad";
+    return;
+  }
+  const button = document.getElementById("cleanup-save");
+  button.disabled = true;
+  try {
+    const response = await fetch("/sync/cleanup", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: mode !== "off", retention_days: mode === "immediate" ? 0 : days }),
+    });
+    const settings = await readResponsePayload(response);
+    if (!response.ok) throw new Error(settings.detail || "Could not save cleanup settings");
+    showCleanupSettings(settings);
+    message.textContent = "Cleanup settings saved. Automatic deletion runs after the next successful sync and reload.";
+    message.className = "status ok";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  } finally {
+    button.disabled = false;
+  }
+}
 
 let previousProgress = '';
 function renderProgress(payload) {
