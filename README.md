@@ -489,6 +489,12 @@ Each step waits for the previous step to finish. If any step fails, the sequence
 
 Poll `GET /sync/status` for live logs and the final result payload. Once `active` becomes `false`, the operation is complete and the status payload contains the final `success`, `detail`, logs, and any apply result fields such as `downloaded`, `manifest_path`, `output_file`, and `filter_count`.
 
+The hosted Sync UI uses one Server-Sent Events (SSE) connection to `GET /sync/events` for live operation status and auto-update settings/history. The REST endpoints `GET /sync/status` and `GET /sync/auto-update` remain available with their existing response formats; commands and schedule changes still use HTTP POST/PUT. The UI falls back to polling while the stream is unavailable and returns to SSE when it reconnects. Idle hidden tabs close the stream and reconnect when visible; an operation started by the tab continues to receive completion updates while hidden.
+
+The event stream sends named `sync-status` and `auto-update` events, each containing a complete snapshot in the corresponding REST response format. Every connection, including a reconnect, starts with fresh snapshots; events are not replayed. Changes are published from manual and scheduled operations, including logs, progress, schedule edits, history and retry state. Bursts are coalesced over 100 ms, with only dirty topics retained per connection so slow readers cannot accumulate an event queue. Idle connections receive a comment heartbeat every 15 seconds. The server clock advances locally in the UI between schedule snapshots. Cleanup file totals retain their separate status polling.
+
+The SSE response sets `X-Accel-Buffering: no` and `Cache-Control: no-cache, no-transform`. The supplied nginx proxy honors this header; other reverse proxies must also disable buffering/caching for `/sync/events` and allow a long-running response. SSE uses ordinary HTTPS and the existing internal mTLS connection, with no WebSocket dependency or upgrade configuration.
+
 ### `POST /sync/filters`
 Stages replacement files in an isolated generation, including manifest download, zip verification, extraction, and filter MD5 verification. Success here means the candidate is checksum-verified; it is not yet active.
 

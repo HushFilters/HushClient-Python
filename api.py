@@ -28,6 +28,7 @@ from filter_sync.r2_client import R2ClientError
 from filter_sync.sync import SyncError, sync_filters, _machine_id_from_mac
 from diagnostic_logs import LogSettings, install_logging, uninstall_logging
 from alerts import AlertManager, AlertSettings
+from sync_events import SyncEvents
 from certificates import alert_certificate_issues, inspect_certificates
 from filter_sync import progress as sync_progress
 from filter_sync.cleanup import CleanupSettings, FilterCleanup
@@ -63,6 +64,9 @@ _auto_update_hour: int | None = None
 _auto_update_history: list[dict[str, object]] = []
 _auto_update_active_since: str | None = None
 _auto_update_wake_event: asyncio.Event | None = None
+sync_events = SyncEvents()
+SYNC_EVENT_HEARTBEAT_SECONDS = 15
+SYNC_EVENT_BATCH_SECONDS = 0.1
 
 
 class _SyncOperationLogState:
@@ -98,6 +102,7 @@ class _SyncOperationLogState:
             }
             self._progress[phases[0]]["status"] = "running"
             self._current_phase = phases[0]
+        sync_events.publish("sync-status", "auto-update")
 
     def update_progress(self, phase, completed=0, total=None, detail="", status="running") -> None:
         with self._lock:
@@ -105,10 +110,12 @@ class _SyncOperationLogState:
                 self._current_phase = phase
                 self._progress[phase] = {"phase": phase, "status": status,
                                          "completed": completed, "total": total, "detail": detail}
+        sync_events.publish("sync-status")
 
     def append(self, line: str) -> None:
         with self._lock:
             self._logs.append(line)
+        sync_events.publish("sync-status")
 
     def set_result(self, payload: dict[str, object]) -> None:
         sync_logger.log(logging.INFO if payload.get("success") else logging.ERROR,
@@ -138,6 +145,7 @@ class _SyncOperationLogState:
                 for key, value in payload.items()
                 if key not in {"success", "detail", "logs", "test_mode"}
             }
+        sync_events.publish("sync-status")
 
         if payload.get("success") is False:
             event = "filter_failure" if self._operation in {"sync_manifest", "sync_reload"} or failed_phase in {"manifest", "validate", "reload"} else "sync_failure"
@@ -147,6 +155,7 @@ class _SyncOperationLogState:
     def finish(self) -> None:
         with self._lock:
             self._active = False
+        sync_events.publish("sync-status", "auto-update")
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -575,6 +584,7 @@ async def endpoints():
             "sync_filters": "/sync/filters",
             "sync_apply": "/sync/apply",
             "sync_status": "/sync/status",
+            "sync_events": "/sync/events",
             "auto_update": "/sync/auto-update",
             "filter_cleanup": "/sync/cleanup",
             "superseded_filters": "/sync/cleanup/files",
@@ -1005,6 +1015,38 @@ async def sync_status_endpoint():
 async def auto_update_status_endpoint():
     """Return scheduler settings, its next run, and recent manual/automatic sync history."""
     return AutoUpdateStatusResponse(**_auto_update_status_snapshot())
+
+
+async def _sync_event_stream(request: Request):
+    # Subscribe before reading snapshots so a concurrent change cannot be missed.
+    with sync_events.subscribe() as changed:
+        yield "retry: 3000\n\n"
+        topics = {"sync-status", "auto-update"}
+        while not await request.is_disconnected():
+            for topic in ("auto-update", "sync-status"):
+                if topic not in topics:
+                    continue
+                payload = (SyncStatusResponse(**sync_operation_logs.snapshot()) if topic == "sync-status"
+                           else AutoUpdateStatusResponse(**_auto_update_status_snapshot()))
+                yield f"event: {topic}\ndata: {payload.model_dump_json()}\n\n"
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=SYNC_EVENT_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+            else:
+                # Collapse bursts of log/progress changes, including for slow readers.
+                await asyncio.sleep(SYNC_EVENT_BATCH_SECONDS)
+            topics = sync_events.take(changed)
+
+
+@app.get("/sync/events", tags=["Sync"], response_class=StreamingResponse,
+         responses={200: {"content": {"text/event-stream": {}}}})
+async def sync_events_endpoint(request: Request):
+    """Stream current sync/schedule snapshots on connect and when state changes."""
+    return StreamingResponse(_sync_event_stream(request), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+    })
 
 
 @app.get("/sync/cleanup", response_model=CleanupSettings, tags=["Sync"])
@@ -1635,6 +1677,7 @@ def _set_auto_update_config(enabled: bool, hour: int | None) -> None:
             _auto_update_enabled = previous_enabled
             _auto_update_hour = previous_hour
             raise
+    sync_events.publish("auto-update")
 
 
 def _auto_update_config() -> tuple[bool, int | None]:
@@ -1651,6 +1694,7 @@ def _append_auto_update_history(entry: dict[str, object]) -> None:
             _persist_auto_update_state_locked()
         except OSError as exc:
             logger.error("Could not persist auto-update history: %s", exc)
+    sync_events.publish("auto-update")
 
 
 def _record_sync_history(
@@ -1757,6 +1801,7 @@ async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asynci
     global _auto_update_retry_at, _auto_update_retry_until
     deadline = scheduled_at + timedelta(seconds=AUTO_UPDATE_RETRY_WINDOW_SECONDS)
     _auto_update_retry_until = deadline.isoformat(timespec="seconds")
+    sync_events.publish("auto-update")
     try:
         while True:
             response = await asyncio.to_thread(_run_scheduled_auto_update)
@@ -1771,6 +1816,7 @@ async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asynci
                 wake_event.clear()
                 return
             _auto_update_retry_at = retry_at.isoformat(timespec="seconds")
+            sync_events.publish("auto-update")
             sync_logger.warning("Scheduled sync will retry at %s; deadline %s", _auto_update_retry_at, _auto_update_retry_until)
             try:
                 await asyncio.wait_for(wake_event.wait(), timeout=AUTO_UPDATE_RETRY_SECONDS)
@@ -1778,12 +1824,14 @@ async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asynci
                 if datetime.now().astimezone() >= deadline:
                     return
                 _auto_update_retry_at = None
+                sync_events.publish("auto-update")
             else:
                 wake_event.clear()
                 return
     finally:
         _auto_update_retry_at = None
         _auto_update_retry_until = None
+        sync_events.publish("auto-update")
 
 
 def _run_scheduled_auto_update() -> SyncApplyResponse | None:

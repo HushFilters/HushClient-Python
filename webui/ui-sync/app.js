@@ -221,7 +221,8 @@ function syncAutoUpdateHourAvailability() {
   document.getElementById("auto-update-hour").disabled = !document.getElementById("auto-update-enabled").checked;
 }
 
-function renderAutoUpdateStatus(payload, applyFormValues = true) {
+function renderAutoUpdateStatus(payload, applyFormValues = true, renderLiveLogs = true) {
+  updateScheduleClock(payload.current_time);
   setText("machine-id", payload.machine_id || "Unavailable (no hardware MAC detected)");
   setText("retry-status", payload.retry_at
     ? `Next retry: ${formatScheduledTime(payload.retry_at)}. Retry window ends: ${formatScheduledTime(payload.retry_until)}.` : "");
@@ -252,10 +253,12 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
     redownloaded: [],
     verified_existing: [],
   } : null;
+  scheduleHistory = payload.history;
+  scheduleActiveRun = activeRun;
   renderAutoUpdateHistory(payload.history, activeRun);
 
   if (payload.active) {
-    renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
+    if (renderLiveLogs) renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
     setStatus("Scheduled filter update running…");
     autoUpdateWasActive = true;
   } else if (autoUpdateWasActive) {
@@ -263,7 +266,7 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
       ? payload.history.find((run) => run.trigger !== "manual")
       : null;
     if (completedRun) {
-      renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
+      if (renderLiveLogs) renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
       setStatus(
         completedRun.status === "success" ? "Scheduled filter update complete" : "Scheduled filter update failed",
         completedRun.status === "success" ? "ok" : "bad",
@@ -276,8 +279,8 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
 }
 
 let schedulePollBusy = false;
-async function refreshAutoUpdateStatus() {
-  if (schedulePollBusy || document.hidden) return;
+async function refreshAutoUpdateStatus(force = false) {
+  if (schedulePollBusy || document.hidden || (syncStreamAvailable && !force)) return;
   schedulePollBusy = true;
   try {
     const response = await fetch("/sync/auto-update", { cache: "no-store" });
@@ -286,7 +289,7 @@ async function refreshAutoUpdateStatus() {
       setAutoUpdateMessage(payload.detail || `Could not load schedule (${response.status})`, "bad");
       return;
     }
-    renderAutoUpdateStatus(payload, !autoUpdateFormDirty);
+    if (!syncStreamAvailable || force) renderAutoUpdateStatus(payload, !autoUpdateFormDirty);
   } catch (err) {
     setAutoUpdateMessage(err instanceof Error ? err.message : String(err), "bad");
   } finally { schedulePollBusy = false; }
@@ -329,6 +332,116 @@ async function saveAutoUpdateSchedule(event) {
 let liveLogPollTimer = null;
 let statusPollBusy = false;
 let localOperationRunning = false;
+let syncEventSource = null;
+let syncStreamAvailable = false;
+let syncConnectTimer = null;
+let latestSyncStatus = null;
+let syncStatusRequest = null;
+const syncStatusWaiters = new Set();
+let scheduleClock = null;
+let scheduleHistory = [];
+let scheduleActiveRun = null;
+
+function updateScheduleClock(value) {
+  const match = /([+-])(\d{2}):(\d{2})$/.exec(value || "");
+  const offsetMinutes = match ? (Number(match[2]) * 60 + Number(match[3])) * (match[1] === "-" ? -1 : 1) : 0;
+  const time = Date.parse(value);
+  if (Number.isFinite(time)) scheduleClock = { time, received: Date.now(), offsetMinutes, suffix: match ? match[0] : "Z" };
+}
+
+function tickScheduleClock() {
+  if (!scheduleClock || document.hidden) return;
+  const time = scheduleClock.time + Date.now() - scheduleClock.received + scheduleClock.offsetMinutes * 60000;
+  const currentTime = new Date(time).toISOString().slice(0, 19) + scheduleClock.suffix;
+  setText("auto-update-current-time", formatScheduledTime(currentTime));
+  if (scheduleActiveRun) {
+    scheduleActiveRun = { ...scheduleActiveRun, completed_at: currentTime };
+    renderAutoUpdateHistory(scheduleHistory, scheduleActiveRun);
+  }
+}
+
+function wakeSyncStatusWaiters() {
+  for (const wake of syncStatusWaiters) wake();
+  syncStatusWaiters.clear();
+}
+
+function receiveSyncStatus(payload) {
+  latestSyncStatus = payload;
+  wakeSyncStatusWaiters();
+  renderLiveStatus(payload);
+}
+
+function closeSyncEventStream() {
+  if (syncEventSource) syncEventSource.close();
+  syncEventSource = null;
+  syncStreamAvailable = false;
+  latestSyncStatus = null;
+  window.clearTimeout(syncConnectTimer);
+  wakeSyncStatusWaiters();
+}
+
+function startSyncEventStream() {
+  if (syncEventSource || (document.hidden && !localOperationRunning) || typeof window.EventSource !== "function") return;
+  let source;
+  try {
+    source = new window.EventSource("/sync/events");
+  } catch (_err) {
+    return; // Existing polling remains available when streaming is unsupported.
+  }
+  syncEventSource = source;
+  syncStreamAvailable = true;
+  // A proxy that never completes the handshake must not leave the UI stale.
+  let receivedStatus = false;
+  let receivedSchedule = false;
+  const awaitSnapshots = () => {
+    receivedStatus = false;
+    receivedSchedule = false;
+    window.clearTimeout(syncConnectTimer);
+    syncConnectTimer = window.setTimeout(() => {
+      if (source !== syncEventSource) return;
+      syncStreamAvailable = false;
+      void pollLiveStatus();
+      void refreshAutoUpdateStatus();
+    }, 5000);
+  };
+  const receivedSnapshot = () => {
+    if (!receivedStatus || !receivedSchedule) return;
+    syncStreamAvailable = true;
+    window.clearTimeout(syncConnectTimer);
+  };
+  awaitSnapshots();
+  source.onopen = () => {
+    if (source !== syncEventSource) return;
+    awaitSnapshots();
+    latestSyncStatus = null;
+    syncStreamAvailable = true;
+  };
+  source.addEventListener("sync-status", event => {
+    if (source !== syncEventSource) return;
+    try {
+      receiveSyncStatus(JSON.parse(event.data));
+      receivedStatus = true;
+      receivedSnapshot();
+    } catch (_err) { source.onerror(); }
+  });
+  source.addEventListener("auto-update", event => {
+    if (source !== syncEventSource) return;
+    try {
+      renderAutoUpdateStatus(JSON.parse(event.data), !autoUpdateFormDirty, false);
+      receivedSchedule = true;
+      receivedSnapshot();
+    } catch (_err) { source.onerror(); }
+  });
+  source.onerror = () => {
+    if (source !== syncEventSource) return;
+    syncStreamAvailable = false;
+    window.clearTimeout(syncConnectTimer);
+    wakeSyncStatusWaiters();
+    void pollLiveStatus();
+    void refreshAutoUpdateStatus();
+    // EventSource reconnects automatically; fresh snapshots restore the UI.
+  };
+}
 
 function renderStatusLogs(payload) {
   renderProgress(payload);
@@ -349,34 +462,42 @@ function renderStatusLogs(payload) {
 }
 
 async function pollLiveStatus() {
-  if (statusPollBusy || document.hidden) return;
+  if (statusPollBusy || document.hidden || syncStreamAvailable) return;
   statusPollBusy = true;
   try {
     const payload = await fetchSyncStatus();
     if (!payload) return;
-    renderProgress(payload);
-    setButtonsDisabled(payload.active || localOperationRunning);
-    if (payload.operation) {
-      renderStatusLogs(payload);
-      if (!localOperationRunning) {
-        setStatus(payload.active ? "Filter operation running…" : (payload.success ? "Filter operation complete" : "Filter operation failed"),
-          payload.active ? "" : (payload.success ? "ok" : "bad"));
-      }
-    }
+    receiveSyncStatus(payload);
   } finally { statusPollBusy = false; }
 }
 
+function renderLiveStatus(payload) {
+  renderProgress(payload);
+  setButtonsDisabled(payload.active || localOperationRunning);
+  if (payload.operation) {
+    renderStatusLogs(payload);
+    if (!localOperationRunning) {
+      setStatus(payload.active ? "Filter operation running…" : (payload.success ? "Filter operation complete" : "Filter operation failed"),
+        payload.active ? "" : (payload.success ? "ok" : "bad"));
+    }
+  }
+}
+
 async function fetchSyncStatus() {
-  try {
-    const response = await fetch("/sync/status", { cache: "no-store" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
+  if (syncStreamAvailable) return latestSyncStatus;
+  if (syncStatusRequest) return syncStatusRequest;
+  syncStatusRequest = (async () => {
+    try {
+      const response = await fetch("/sync/status", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) return null;
+      // Ignore an older HTTP response if the SSE connection has recovered.
+      return syncStreamAvailable ? latestSyncStatus : payload;
+    } catch (_err) {
       return null;
     }
-    return payload;
-  } catch (_err) {
-    return null;
-  }
+  })();
+  try { return await syncStatusRequest; } finally { syncStatusRequest = null; }
 }
 
 function startLiveLogPolling() {
@@ -422,7 +543,15 @@ async function waitForOperationCompletion(expectedOperation) {
         return payload;
       }
     }
-    await sleep(1000);
+    await new Promise(resolve => {
+      const wake = () => {
+        window.clearTimeout(timer);
+        syncStatusWaiters.delete(wake);
+        resolve();
+      };
+      const timer = window.setTimeout(wake, 1000);
+      syncStatusWaiters.add(wake);
+    });
   }
 }
 
@@ -468,6 +597,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     setButtonsDisabled(false);
     await pollLiveStatus();
     await loadCleanupInventory();
+    if (document.hidden) closeSyncEventStream();
   }
 }
 
@@ -491,6 +621,10 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
       return;
     }
 
+    // A fresh subscription guarantees its initial snapshot follows this accepted
+    // command, rather than reusing the cached completion of an earlier run.
+    closeSyncEventStream();
+    startSyncEventStream();
     const finalPayload = await waitForOperationCompletion(operation);
     if (finalPayload.success !== true) {
       setStatus(failure, "bad");
@@ -511,6 +645,7 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     setButtonsDisabled(false);
     await pollLiveStatus();
     await loadCleanupInventory();
+    if (document.hidden) closeSyncEventStream();
   }
 }
 
@@ -523,9 +658,17 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("cleanup-mode").addEventListener("change", syncCleanupDaysAvailability);
   document.getElementById("cleanup-form").addEventListener("submit", saveCleanupSettings);
   document.getElementById("cleanup-refresh").addEventListener("click", loadCleanupSettings);
+  startSyncEventStream();
   startLiveLogPolling();
   refreshLoadedCount();
   void refreshAutoUpdateStatus();
+  window.setInterval(tickScheduleClock, 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && !localOperationRunning) closeSyncEventStream();
+    else if (!document.hidden) startSyncEventStream();
+  });
+  window.addEventListener("pagehide", closeSyncEventStream);
+  window.addEventListener("pageshow", startSyncEventStream);
 
   document.getElementById("auto-update-form").addEventListener("submit", saveAutoUpdateSchedule);
   document.getElementById("auto-update-enabled").addEventListener("change", () => {
@@ -538,7 +681,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("auto-update-refresh").addEventListener("click", () => {
     autoUpdateFormDirty = false;
     setAutoUpdateMessage("");
-    void refreshAutoUpdateStatus();
+    void refreshAutoUpdateStatus(true);
   });
   window.setInterval(() => {
     void refreshAutoUpdateStatus();
