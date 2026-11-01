@@ -59,6 +59,7 @@ function setup({ streaming = true, fetchOverride } = {}) {
       if (url === '/sync/auto-update') return response(schedule());
       if (url === '/sync/apply') return response({ started: true, operation: 'sync_apply' });
       if (url === '/sync/cleanup') return response({ enabled: false, retention_days: 31 });
+      if (url === '/stats') return response({ filter_count: 1280 });
       return response({ active: false, inventory: null });
     },
   };
@@ -169,8 +170,80 @@ test('background commands await their fresh SSE result, including fast completio
   assert.equal(finished, true);
   assert.match(ui.elements['sync-output'].textContent, /New run completed/);
   assert.equal(ui.elements['sync-status'].textContent, 'New sync complete');
+  assert.equal(ui.elements['loaded-count'].textContent, '42');
   assert.equal(ui.sources[1].closed, true);
   assert.equal(ui.statusReads().length, 0);
+});
+
+test('live activation results refresh loaded filters for manual, scheduled, and external reloads', async () => {
+  for (const operation of ['sync_apply', 'auto_sync_apply', 'sync_reload']) {
+    const ui = setup();
+    await flush();
+    assert.equal(ui.elements['loaded-count'].textContent, '1280');
+    ui.sources[0].connect(status({ operation, active: true, success: null, filter_count: 0 }));
+    assert.equal(ui.elements['loaded-count'].textContent, '1280');
+    // The sync was started elsewhere; this tab has no onSuccess callback.
+    ui.sources[0].send('sync-status', status({ operation, filter_count: 512 }));
+    assert.equal(ui.elements['loaded-count'].textContent, '512');
+    assert.equal(ui.requests.filter(r => r.url === '/stats').length, 1);
+  }
+});
+
+test('staged filter counts and failed activation leave the active count unchanged', async () => {
+  const ui = setup();
+  await flush();
+  ui.sources[0].connect(status({ filter_count: 512 }));
+  for (const payload of [
+    status({ operation: 'sync_manifest', filter_count: 2048 }),
+    status({ operation: 'sync_filters', filter_count: 2048 }),
+    status({ active: true, filter_count: 2048 }),
+    status({ success: false, filter_count: 0 }),
+    status({ filter_count: undefined }),
+  ]) {
+    ui.sources[0].send('sync-status', payload);
+    assert.equal(ui.elements['loaded-count'].textContent, '512');
+  }
+  ui.sources[0].send('sync-status', status({ filter_count: 0 }));
+  assert.equal(ui.elements['loaded-count'].textContent, '0');
+});
+
+test('manual reload uses its activation result without fetching stale stats again', async () => {
+  const ui = setup({ fetchOverride: url => url === '/sync/reload'
+    ? { ok: true, text: async () => JSON.stringify({ success: true, filter_count: 512 }) } : null });
+  await flush();
+  ui.sources[0].connect(status({ active: true, success: null }));
+  ui.elements['reload-button'].listeners.click();
+  await flush();
+  assert.equal(ui.elements['loaded-count'].textContent, '512');
+  assert.equal(ui.requests.filter(r => r.url === '/stats').length, 1);
+});
+
+test('an old stats response cannot overwrite a newer activated filter count', async () => {
+  let finishStats;
+  const ui = setup({ fetchOverride: url => url === '/stats'
+    ? new Promise(resolve => { finishStats = () => resolve({ ok: true, json: async () => ({ filter_count: 1280 }) }); }) : null });
+  ui.sources[0].connect(status({ filter_count: 512 }));
+  assert.equal(ui.elements['loaded-count'].textContent, '512');
+  finishStats();
+  await flush();
+  assert.equal(ui.elements['loaded-count'].textContent, '512');
+  assert.equal(ui.requests.find(r => r.url === '/stats').options.cache, 'no-store');
+});
+
+test('REST polling and reconnect snapshots refresh the count after missed completion events', async () => {
+  const polling = setup({ streaming: false, fetchOverride: url => url === '/sync/status'
+    ? { ok: true, json: async () => status({ filter_count: 512 }) } : null });
+  await flush();
+  assert.equal(polling.elements['loaded-count'].textContent, '512');
+  const ui = setup();
+  await flush();
+  ui.sources[0].connect(status({ active: true, success: null }));
+  ui.context.document.hidden = true;
+  ui.documentEvents.visibilitychange();
+  ui.context.document.hidden = false;
+  ui.documentEvents.visibilitychange();
+  ui.sources[1].connect(status({ filter_count: 512 }));
+  assert.equal(ui.elements['loaded-count'].textContent, '512');
 });
 
 test('local clock advances with the server UTC offset without network requests', () => {

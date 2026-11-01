@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
-  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20261101b">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261101b">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20261101c">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261101e">
 </head>
 <body class="operational-page">
   <main class="workspace-shell">
@@ -49,7 +49,7 @@
               <section class="sync-action-block sync-action-block--primary">
                 <p class="section-eyebrow">Primary Action</p>
                 <h2 class="sync-section-heading">Apply Latest Filters</h2>
-                <p class="section-copy">Stage and verify replacement filters, validate all 256 shards and four test credentials in every group, then safely activate the new filters. Existing requests finish using their original filters.</p>
+                <p class="section-copy">Stage and verify replacement filters, validate all 256 shards and the required test credentials in every group, then safely activate the new filters. New builds check one credential per shard; legacy builds check the original four. Existing requests finish using their original filters.</p>
                 <button id="apply-button" class="action-button" type="button">sync, update manifest, and reload filters</button>
               </section>
 
@@ -77,12 +77,10 @@
             </div>
             <form id="sync-settings-form" class="auto-update-form">
               <label class="toggle-field" for="reuse-verified-md5">
+                <span class="field-label">Reuse verified MD5 results</span>
                 <input id="reuse-verified-md5" type="checkbox" disabled>
                 <span class="toggle-control" aria-hidden="true"></span>
-                <span>
-                  <strong>Reuse verified MD5 results</strong>
-                  <small>Skip rehashing only when the remote MD5, local file identity, size, and timestamps match a saved verification. Missing records or changed metadata force a rehash. Disabled by default.</small>
-                </span>
+                <small class="field-help">Skip rehashing only when the remote MD5, local file identity, size, and timestamps match a saved verification. Missing records or changed metadata force a rehash. Disabled by default.</small>
               </label>
               <p class="section-copy">Applies to manual and scheduled syncs. Reusing a saved result does not detect corruption that leaves file metadata unchanged.</p>
               <div class="schedule-actions">
@@ -106,20 +104,20 @@
             </div>
 
             <form id="auto-update-form" class="auto-update-form">
-              <label class="toggle-field" for="auto-update-enabled">
-                <input id="auto-update-enabled" type="checkbox">
-                <span class="toggle-control" aria-hidden="true"></span>
-                <span>
-                  <strong>Enable daily updates</strong>
-                  <small>The schedule takes effect immediately and survives container restarts.</small>
-                </span>
-              </label>
+              <div class="settings-fields">
+                <label class="toggle-field" for="auto-update-enabled">
+                  <span class="field-label">Enable daily updates</span>
+                  <input id="auto-update-enabled" type="checkbox">
+                  <span class="toggle-control" aria-hidden="true"></span>
+                  <small class="field-help">The schedule takes effect immediately and survives container restarts.</small>
+                </label>
 
-              <label class="field-stack" for="auto-update-hour">
-                <span class="field-label">Container-local start hour</span>
-                <input id="auto-update-hour" class="app-input schedule-hour-input" type="number" min="0" max="23" step="1" required>
-                <span class="field-help">Use 24-hour time. For example, 2 means 02:00 and 14 means 14:00.</span>
-              </label>
+                <label class="field-stack" for="auto-update-hour">
+                  <span class="field-label">Container-local start hour</span>
+                  <input id="auto-update-hour" class="app-input schedule-hour-input" type="number" min="0" max="23" step="1" required>
+                  <span class="field-help">Use 24-hour time. For example, 2 means 02:00 and 14 means 14:00.</span>
+                </label>
+              </div>
 
               <div class="schedule-actions">
                 <button id="auto-update-save" class="action-button" type="submit">Save schedule</button>
@@ -156,19 +154,21 @@
               <p class="section-copy">Choose when to delete old filter files after their replacements have successfully loaded. Retention starts when a filter is superseded, not when it was downloaded.</p>
             </div>
             <form id="cleanup-form" class="auto-update-form">
-              <label class="field-stack" for="cleanup-mode">
-                <span class="field-label">Automatic deletion</span>
-                <select id="cleanup-mode" class="app-input" disabled>
-                  <option value="retained" selected>Keep for a number of days</option>
-                  <option value="immediate">Immediately after loading</option>
-                  <option value="off">Off — delete manually</option>
-                </select>
-              </label>
-              <label id="cleanup-days-field" class="field-stack" for="cleanup-days">
-                <span class="field-label">Days to keep superseded filters</span>
-                <input id="cleanup-days" class="app-input schedule-hour-input" type="number" min="1" max="31" step="1" value="31" required disabled>
-                <span class="field-help">1–31 days. Default: 31 days.</span>
-              </label>
+              <div class="settings-fields">
+                <label class="field-stack" for="cleanup-mode">
+                  <span class="field-label">Automatic deletion</span>
+                  <select id="cleanup-mode" class="app-input" disabled>
+                    <option value="retained" selected>Keep for a number of days</option>
+                    <option value="immediate">Immediately after loading</option>
+                    <option value="off">Off — delete manually</option>
+                  </select>
+                </label>
+                <label id="cleanup-days-field" class="field-stack" for="cleanup-days">
+                  <span class="field-label">Days to keep superseded filters</span>
+                  <input id="cleanup-days" class="app-input schedule-hour-input" type="number" min="1" max="31" step="1" value="31" required disabled>
+                  <span class="field-help">1–31 days. Default: 31 days.</span>
+                </label>
+              </div>
               <div class="schedule-actions">
                 <button id="cleanup-save" class="action-button" type="submit" disabled>Save cleanup settings</button>
                 <button id="cleanup-refresh" class="action-button action-button--secondary" type="button">Refresh</button>
@@ -230,6 +230,6 @@
   </main>
 
   <script src="/ui-assets/log-window.js?v=20261101b" defer></script>
-  <script src="/ui-sync/app.js?v=20261101d" defer></script>
+  <script src="/ui-sync/app.js?v=20261101f" defer></script>
 </body>
 </html>

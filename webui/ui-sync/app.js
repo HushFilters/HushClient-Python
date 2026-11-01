@@ -19,14 +19,25 @@ function setMetric(id, value) {
   setText(id, value);
 }
 
+let loadedCountVersion = 0;
+
+function updateLoadedCount(count) {
+  if (!Number.isInteger(count) || count < 0) return false;
+  // An activation result supersedes any stats request already in flight.
+  loadedCountVersion++;
+  setMetric("loaded-count", count);
+  return true;
+}
+
 async function refreshLoadedCount() {
+  const requestVersion = ++loadedCountVersion;
   try {
-    const response = await fetch("/stats");
+    const response = await fetch("/stats", { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       return;
     }
-    setMetric("loaded-count", payload.filter_count || 0);
+    if (requestVersion === loadedCountVersion) updateLoadedCount(payload.filter_count);
   } catch (_err) {
     // Leave the existing metric value in place if stats cannot be fetched.
   }
@@ -489,6 +500,12 @@ async function pollLiveStatus() {
 }
 
 function renderLiveStatus(payload) {
+  // Download and manifest preparation counts describe staged files, not the
+  // active manager. Only successful activation results can replace this metric.
+  if (payload.active === false && payload.success === true
+      && ["sync_apply", "auto_sync_apply", "sync_reload"].includes(payload.operation)) {
+    updateLoadedCount(payload.filter_count);
+  }
   renderProgress(payload);
   setButtonsDisabled(payload.active || localOperationRunning);
   if (payload.operation) {
@@ -719,7 +736,7 @@ window.addEventListener("DOMContentLoaded", () => {
       success: "Filter sync, manifest update, and reload complete",
       failure: "Combined filter update failed",
       async onSuccess(payload) {
-        await refreshLoadedCount();
+        if (!updateLoadedCount(payload.filter_count)) await refreshLoadedCount();
       },
     });
   });
@@ -748,8 +765,8 @@ window.addEventListener("DOMContentLoaded", () => {
       inProgress: "Reloading filters...",
       success: "Reload complete",
       failure: "Reload failed",
-      async onSuccess(_payload) {
-        await refreshLoadedCount();
+      async onSuccess(payload) {
+        if (!updateLoadedCount(payload.filter_count)) await refreshLoadedCount();
       },
     });
   });
@@ -1043,7 +1060,7 @@ function renderProgress(payload) {
   summary.textContent = payload.active ? 'Operation in progress' : (payload.success === true ? 'Operation complete' : (payload.success === false ? 'Operation failed' : 'No operation started yet.'));
   const container = document.getElementById('sync-progress');
   container.replaceChildren();
-  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Stage incoming filters', verify: 'Verify checksums', manifest: 'Prepare candidate manifest', validate: 'Validate all shards and four test credentials', reload: 'Activate validated filters' };
+  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Stage incoming filters', verify: 'Verify checksums', manifest: 'Prepare candidate manifest', validate: 'Validate all shards and required test credentials', reload: 'Activate validated filters' };
   const statuses = { pending: 'Waiting', running: 'In progress', complete: 'Complete', failed: 'Failed', skipped: 'Not needed' };
   payload.progress.forEach(phase => {
     const row = document.createElement('div');

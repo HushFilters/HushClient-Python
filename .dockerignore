@@ -15,6 +15,7 @@ tls/
 venv/
 .venv/
 .cache/
+.pytest_cache/
 *.txt.bak
 test_*.tsv
 debug_*.py
