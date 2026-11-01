@@ -11,6 +11,7 @@
 
 .sync-actions-panel__inner {
   height: 100%;
+  align-content: start;
 }
 
 .sync-action-block {
@@ -40,6 +41,63 @@
   color: var(--text-primary);
   font-size: 1rem;
   font-weight: 600;
+}
+
+.sync-disclosure__summary {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  list-style: none;
+  cursor: pointer;
+}
+
+.sync-disclosure__summary::-webkit-details-marker {
+  display: none;
+}
+
+.sync-disclosure__summary .sync-section-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.sync-disclosure__summary::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  color: var(--text-soft);
+  transform: rotate(45deg);
+}
+
+.sync-disclosure[open] > .sync-disclosure__summary::after {
+  transform: rotate(225deg);
+}
+
+.sync-disclosure__summary:hover .sync-section-heading {
+  color: var(--color-primary-300);
+}
+
+.sync-disclosure__summary:focus-visible {
+  outline: 2px solid var(--color-primary-300);
+  outline-offset: -2px;
+  border-radius: 0.5rem;
+}
+
+.sync-disclosure__summary .section-eyebrow {
+  display: block;
+  margin-bottom: 0.4rem;
+}
+
+.sync-disclosure__content {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+}
+
+.sync-disclosure > .auto-update-card__inner {
+  padding-top: 0;
 }
 
 #sync-status {

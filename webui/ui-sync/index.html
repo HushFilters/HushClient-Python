@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
   <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20261101c">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261101e">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261101g">
 </head>
 <body class="operational-page">
   <main class="workspace-shell">
@@ -54,27 +54,31 @@
               </section>
 
               <section class="sync-action-block">
-                <p class="section-eyebrow">Manual Steps</p>
-                <h2 class="sync-section-heading">Manual Steps</h2>
-                <p class="section-copy">Run the workflow one step at a time. Sync and manifest preparation leave the active filters in place; reload validates the candidate before activating it.</p>
-                <div class="sync-actions-grid">
-                  <button id="sync-button" class="action-button action-button--secondary" type="button">sync filters from nWebbed</button>
-                  <button id="manifest-button" class="action-button action-button--amber" type="button">update manifest</button>
-                  <button id="reload-button" class="action-button action-button--cyan" type="button">reload with new filters</button>
-                </div>
+                <details class="sync-disclosure">
+                  <summary class="sync-disclosure__summary">
+                    <h2 class="sync-section-heading">Manual Steps</h2>
+                  </summary>
+                  <div class="sync-disclosure__content">
+                    <p class="section-copy">Run the workflow one step at a time. Sync and manifest preparation leave the active filters in place; reload validates the candidate before activating it.</p>
+                    <div class="sync-actions-grid">
+                      <button id="sync-button" class="action-button action-button--secondary" type="button">sync filters from nWebbed</button>
+                      <button id="manifest-button" class="action-button action-button--amber" type="button">update manifest</button>
+                      <button id="reload-button" class="action-button action-button--cyan" type="button">reload with new filters</button>
+                    </div>
+                  </div>
+                </details>
                 <p id="sync-status" class="status">Idle</p>
               </section>
             </div>
           </section>
         </div>
 
-        <section class="surface-card auto-update-card">
+        <details class="surface-card auto-update-card sync-disclosure">
+          <summary class="surface-card__inner sync-disclosure__summary">
+            <h2 class="sync-section-heading"><span class="section-eyebrow">Verification</span>Filter MD5 Verification</h2>
+          </summary>
           <div class="surface-card__inner auto-update-card__inner">
-            <div>
-              <p class="section-eyebrow">Verification</p>
-              <h2 class="sync-section-heading">Filter MD5 Verification</h2>
-              <p class="section-copy">By default, every sync rehashes existing filters. Newly downloaded filters are always hashed and verified.</p>
-            </div>
+            <p class="section-copy">By default, every sync rehashes existing filters. Newly downloaded filters are always hashed and verified.</p>
             <form id="sync-settings-form" class="auto-update-form">
               <label class="toggle-field" for="reuse-verified-md5">
                 <span class="field-label">Reuse verified MD5 results</span>
@@ -90,18 +94,15 @@
               <p id="sync-settings-message" class="status" aria-live="polite"></p>
             </form>
           </div>
-        </section>
+        </details>
 
-        <section class="surface-card auto-update-card">
+        <details class="surface-card auto-update-card sync-disclosure">
+          <summary class="surface-card__inner sync-disclosure__summary">
+            <h2 class="sync-section-heading"><span class="section-eyebrow">Automation</span>Daily Auto-Update</h2>
+            <span id="auto-update-badge" class="schedule-badge">Loading</span>
+          </summary>
           <div class="surface-card__inner auto-update-card__inner">
-            <div class="auto-update-heading">
-              <div>
-                <p class="section-eyebrow">Automation</p>
-                <h2 class="sync-section-heading">Daily Auto-Update</h2>
-                <p class="section-copy">Control the server-side schedule and review recent manual and automatic sync outcomes.</p>
-              </div>
-              <span id="auto-update-badge" class="schedule-badge">Loading</span>
-            </div>
+            <p class="section-copy">Control the server-side schedule and review recent manual and automatic sync outcomes.</p>
 
             <form id="auto-update-form" class="auto-update-form">
               <div class="settings-fields">
@@ -144,15 +145,14 @@
             </dl>
 
           </div>
-        </section>
+        </details>
 
-        <section class="surface-card auto-update-card">
+        <details class="surface-card auto-update-card sync-disclosure">
+          <summary class="surface-card__inner sync-disclosure__summary">
+            <h2 class="sync-section-heading"><span class="section-eyebrow">Storage</span>Superseded Filter Cleanup</h2>
+          </summary>
           <div class="surface-card__inner auto-update-card__inner">
-            <div>
-              <p class="section-eyebrow">Storage</p>
-              <h2 class="sync-section-heading">Superseded Filter Cleanup</h2>
-              <p class="section-copy">Choose when to delete old filter files after their replacements have successfully loaded. Retention starts when a filter is superseded, not when it was downloaded.</p>
-            </div>
+            <p class="section-copy">Choose when to delete old filter files after their replacements have successfully loaded. Retention starts when a filter is superseded, not when it was downloaded.</p>
             <form id="cleanup-form" class="auto-update-form">
               <div class="settings-fields">
                 <label class="field-stack" for="cleanup-mode">
@@ -188,7 +188,7 @@
             </div>
             <p id="cleanup-files-message" class="status" aria-live="polite"></p>
           </div>
-        </section>
+        </details>
 
         <section class="metrics-grid sync-metrics-grid">
           <article id="sync-progress-section" class="surface-card progress-card">
