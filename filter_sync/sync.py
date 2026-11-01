@@ -15,6 +15,7 @@ from zipfile import ZipFile
 import requests
 
 from .r2_client import R2Client, R2ClientError, R2Config
+from .canaries import manifest_test_sets
 from .progress import report, segment
 from .settings import load_settings
 from helpers.generate_manifest import _build_location_map, _resolve_manifest_filter_path
@@ -92,6 +93,11 @@ class FilterManifest:
             data = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise SyncError("Downloaded manifest is not valid JSON") from exc
+
+        try:
+            manifest_test_sets(data)
+        except ValueError as exc:
+            raise SyncError(str(exc)) from exc
 
         locations = tuple(data.get("current_filter_locations", []))
         zip_entries = tuple(

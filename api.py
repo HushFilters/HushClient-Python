@@ -1494,7 +1494,7 @@ def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
             raise SyncError("Some configured filters could not be loaded; keeping previous filters active")
         groups = activation.validate_groups(candidate, payload,
             sync_operation_logs.update_progress, log, test_mode=test_mode)
-        log(f"INFO candidate validated: {groups} groups; all four test credentials passed in every group")
+        log(f"INFO candidate validated: {groups} groups; all required test credentials passed in every group")
         try:
             activation.inspect_retained_groups(candidate, Path("filters"), log)
         except Exception as exc:

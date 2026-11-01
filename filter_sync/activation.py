@@ -12,8 +12,9 @@ from pathlib import Path
 from core.hash import credential_digest
 from core.main import HushFilter
 from .sync import SyncError, calculate_md5, file_metadata
+from .canaries import LEGACY_CREDENTIALS, LEGACY_ID, manifest_test_sets
 
-CANARIES = tuple((f"testusername{i}@nwebbed.com", f"testpassword{i}") for i in range(1, 5))
+CANARIES = LEGACY_CREDENTIALS
 
 
 def _sync_directory(path):
@@ -193,12 +194,28 @@ def validate_groups(manager, payload, progress, log, *, test_mode=False):
         missing = {f"{i:02x}" for i in range(256)} - shards.keys()
         if missing or len(shards) != 256:
             raise SyncError(f"Incomplete shard group {group}: missing {', '.join(sorted(missing))}")
-    total = len(groups) * len(CANARIES)
+    source = {} if test_mode else payload.get("source_manifest", payload)
+    try:
+        test_sets = manifest_test_sets(source)
+    except ValueError as exc:
+        raise SyncError(str(exc)) from exc
+    group_tests = {}
+    for group in groups:
+        directory = Path(group)
+        location = directory.parent.name + "/" + directory.name
+        if test_sets is None:
+            group_tests[group] = (LEGACY_ID, CANARIES)
+        elif location not in test_sets:
+            raise SyncError(f"Missing test set for candidate group {location}")
+        else:
+            group_tests[group] = test_sets[location]
+    total = sum(len(credentials) for _, credentials in group_tests.values())
     completed = 0
     failures = []
     for group, shards in sorted(groups.items()):
         passed = 0
-        for username, password in CANARIES:
+        set_id, credentials = group_tests[group]
+        for username, password in credentials:
             shard = credential_digest(username, password).hex()[:2]
             progress("validate", completed, total, f"Checking {username} in {group} (shard {shard})")
             if not shards[shard].check(username, password):
@@ -208,7 +225,7 @@ def validate_groups(manager, payload, progress, log, *, test_mode=False):
             else:
                 passed += 1
             completed += 1
-        log(f"{'INFO' if passed == 4 else 'ERROR'} validated group {group}: all 256 shards loaded; {passed}/4 test credentials passed")
+        log(f"{'INFO' if passed == len(credentials) else 'ERROR'} validated group {group}: all 256 shards loaded; {passed}/{len(credentials)} test credentials passed ({set_id})")
     if failures:
         raise SyncError("; ".join(failures))
     check_identities(payload)

@@ -17,6 +17,14 @@ from filter_sync.cleanup import CleanupSettings, FilterCleanup
 from filter_sync.sync import sync_filters
 from test.test_filter_sync import FakeDownloader, _make_zip_bytes
 
+SHARD_TEST_SET = json.loads((Path(__file__).parent / "data/shard_canaries_v1.json").read_text(encoding="utf-8"))
+SHARD_CANARIES = tuple((entry["username"], entry["password"]) for entry in SHARD_TEST_SET["credentials"])
+
+
+def canary_metadata(*locations):
+    return {"test_sets": {SHARD_TEST_SET["id"]: SHARD_TEST_SET},
+            "current_filter_tests": {location: SHARD_TEST_SET["id"] for location in locations}}
+
 
 @pytest.fixture(scope="module")
 def public_key():
@@ -24,11 +32,11 @@ def public_key():
         serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
 
 
-def group_bytes(public_key, start, end, *, omit_canary=None, version=1):
+def group_bytes(public_key, start, end, *, omit_canary=None, version=1, canaries=activation.CANARIES):
     result = {}
     for index in range(256):
         bits = bytearray(128)
-        for number, (username, password) in enumerate(activation.CANARIES, start=1):
+        for number, (username, password) in enumerate(canaries, start=1):
             digest = hashlib.sha256((username.lower() + "nWebbed" + password).encode()).digest()
             if digest[0] == index and number != omit_canary:
                 for probe in bloom_probe_hashes(digest, nk=3):
@@ -50,11 +58,12 @@ def install_group(root, start, end, files):
     return directory
 
 
-def remote_group(start, end, files):
+def remote_group(start, end, files, *, metadata=None):
     build = f"{start}_{end}"
     location = f"{end[:6]}/{build}"
     zipped = _make_zip_bytes(files)
     payload = json.dumps({
+        **(metadata or {}),
         "current_filter_locations": [location],
         "current_filter_zips": [{"path": f"{location}/{build}.zip", "md5": hashlib.md5(zipped).hexdigest()}],
         "current_filter_files": [{"path": f"{build}/{name}", "md5": hashlib.md5(data).hexdigest()}
@@ -107,7 +116,7 @@ def test_full_apply_checks_four_canaries_and_commits_generation(monkeypatch, ins
     assert all(api._filter_call("check", username, password).found for username, password in activation.CANARIES)
     assert len(api.filter_manager.filters) == 256
     assert all(".generations" in path for path, _ in api.filter_manager.filters)
-    assert any("all four test credentials passed in every group" in line for line in result.logs)
+    assert any("all required test credentials passed in every group" in line for line in result.logs)
     assert any("retained group" in line and "all four" in line for line in result.logs)
     assert len(cleanup.retired) == 256 and all(path.exists() for path in directory.glob("*.hf"))
     assert Path(api._current_filter_configuration()) == activation.active_path()

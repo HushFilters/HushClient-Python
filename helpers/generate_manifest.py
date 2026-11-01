@@ -43,6 +43,12 @@ def generate_manifest(filters_dir: str = "filters", output_file: str = "manifest
         "version": "1.0",
         "filters": filter_paths,
     }
+    # Preserve the exact per-build test-set selection for standalone reloads.
+    source_path = filters_path / REMOTE_MANIFEST_NAME
+    if source_path.exists():
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        if "test_sets" in source or "current_filter_tests" in source:
+            manifest["source_manifest"] = source
 
     output_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"Generated {output_path} with {len(filter_paths)} filters")

@@ -362,7 +362,7 @@ def test_reload_filters_endpoint_swaps_manager(monkeypatch) -> None:
     assert payload["filter_count"] == 1
     assert payload["filters"] == ["filters/new.hf"]
     assert payload["logs"] == [
-        "INFO candidate validated: 1 groups; all four test credentials passed in every group",
+        "INFO candidate validated: 1 groups; all required test credentials passed in every group",
         "INFO activated 1 validated filters",
         "INFO drained existing requests and closed previous filter mappings",
     ]
