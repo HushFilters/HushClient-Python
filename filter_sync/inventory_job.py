@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 
 
 class InventoryJob:
-    def __init__(self):
+    def __init__(self, on_change=None):
         self._lock = threading.Lock()
+        self._on_change = on_change or (lambda: None)
         self._thread = None
         self._active = False
         self._inventory = None
@@ -35,6 +36,7 @@ class InventoryJob:
                 self._active = False
                 self._thread = None
                 raise
+        self._on_change()
 
     def _run(self, scan):
         while True:
@@ -49,10 +51,15 @@ class InventoryJob:
                 with self._lock:
                     self._error = str(getattr(exc, "detail", "Could not refresh file totals; check diagnostic logs."))
             with self._lock:
-                if self._pending_scan is None:
+                finished = self._pending_scan is None
+                if finished:
                     self._active = False
-                    return
-                scan, self._pending_scan = self._pending_scan, None
+                else:
+                    scan, self._pending_scan = self._pending_scan, None
+            # Notify outside the lock so subscribers may safely read a snapshot.
+            self._on_change()
+            if finished:
+                return
 
     def join(self):
         if self._thread is not None:

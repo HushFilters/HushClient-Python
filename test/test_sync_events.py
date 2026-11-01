@@ -1,11 +1,13 @@
 """Exercise live snapshots without downloading or reloading real filters."""
 import asyncio
 import json
+import threading
 
 from fastapi.testclient import TestClient
 
 import api
 from sync_events import SyncEvents
+from filter_sync.inventory_job import InventoryJob
 
 
 class ConnectedRequest:
@@ -36,6 +38,7 @@ def test_stream_initial_snapshots_worker_changes_reconnect_and_cleanup(monkeypat
         assert schedule["machine_id"] == "test-machine"
         initial = event_payload(await anext(stream))
         assert initial == api.SyncStatusResponse(**state.snapshot()).model_dump()
+        assert event_payload(await anext(stream)) == api.cleanup_inventory_job.snapshot()
 
         # Notifications from worker threads coalesce into the latest snapshot.
         def work():
@@ -66,6 +69,7 @@ def test_stream_initial_snapshots_worker_changes_reconnect_and_cleanup(monkeypat
         await anext(reconnected)
         await anext(reconnected)
         assert event_payload(await anext(reconnected)) == completed
+        await anext(reconnected)  # Cleanup snapshot.
         await reconnected.aclose()
         assert not broker._subscribers
 
@@ -80,7 +84,7 @@ def test_idle_stream_heartbeats_and_cancellation_release_subscribers(monkeypatch
 
     async def exercise():
         stream = api._sync_event_stream(ConnectedRequest())
-        for _ in range(3):
+        for _ in range(4):
             await anext(stream)
         assert await anext(stream) == ": keepalive\n\n"
         # Cancel while waiting for a change, as an ASGI disconnect would do.
@@ -160,7 +164,7 @@ def test_asgi_stream_flushes_events_and_disconnects_through_http_middleware(monk
             start = await asyncio.wait_for(outgoing.get(), 2)
             assert start["type"] == "http.response.start" and start["status"] == 200
             frames = []
-            while len(frames) < 3:
+            while len(frames) < 4:
                 message = await asyncio.wait_for(outgoing.get(), 2)
                 if message.get("body"):
                     assert message["more_body"] is True
@@ -168,6 +172,7 @@ def test_asgi_stream_flushes_events_and_disconnects_through_http_middleware(monk
             assert frames[0] == "retry: 3000\n\n"
             assert frames[1].startswith("event: auto-update\n")
             assert frames[2].startswith("event: sync-status\n")
+            assert frames[3].startswith("event: cleanup-status\n")
             state.append("An update after the initial response")
             changed = await asyncio.wait_for(outgoing.get(), 2)
             assert "An update after the initial response" in changed["body"].decode()
@@ -181,5 +186,53 @@ def test_asgi_stream_flushes_events_and_disconnects_through_http_middleware(monk
                     await task
                 except asyncio.CancelledError:
                     pass
+
+    asyncio.run(exercise())
+
+
+def test_inventory_scan_start_success_and_failure_are_streamed(monkeypatch):
+    broker = SyncEvents()
+    job = InventoryJob(on_change=lambda: broker.publish("cleanup-status"))
+    entered, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(api, "sync_events", broker)
+    monkeypatch.setattr(api, "cleanup_inventory_job", job)
+    monkeypatch.setattr(api, "SYNC_EVENT_BATCH_SECONDS", 0)
+    monkeypatch.setattr(api, "_machine_id_from_mac", lambda: "test-machine")
+
+    def scan():
+        entered.set()
+        assert release.wait(5)
+        return {"filter_count": 7, "total_bytes": 700, "confirmation_token": "scan-token"}
+
+    def fail():
+        raise OSError("Scan failed")
+
+    async def exercise():
+        stream = api._sync_event_stream(ConnectedRequest())
+        try:
+            for _ in range(4):
+                await anext(stream)
+            job.start(scan)
+            assert await asyncio.to_thread(entered.wait, 1)
+            active = await asyncio.wait_for(anext(stream), 1)
+            assert active.startswith("event: cleanup-status\n")
+            assert event_payload(active)["active"] is True
+            release.set()
+            await asyncio.to_thread(job.join)
+            completed = event_payload(await asyncio.wait_for(anext(stream), 1))
+            assert completed == job.snapshot()
+            assert completed["active"] is False
+            assert completed["inventory"]["filter_count"] == 7
+            job.start(fail)
+            await asyncio.to_thread(job.join)
+            failed = event_payload(await asyncio.wait_for(anext(stream), 1))
+            assert failed["error"]
+            assert failed["inventory"] == completed["inventory"]
+            assert failed["checked_at"] == completed["checked_at"]
+        finally:
+            release.set()
+            await asyncio.to_thread(job.join)
+            await stream.aclose()
+        assert not broker._subscribers
 
     asyncio.run(exercise())

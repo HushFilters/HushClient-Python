@@ -48,7 +48,8 @@ sync_logger = logging.getLogger("hushclient.sync")
 diagnostic_logs = None
 alert_manager: AlertManager | None = None
 filter_cleanup: FilterCleanup | None = None
-cleanup_inventory_job = InventoryJob()
+sync_events = SyncEvents()
+cleanup_inventory_job = InventoryJob(on_change=lambda: sync_events.publish("cleanup-status"))
 CERTIFICATE_CHECK_INTERVAL_SECONDS = 3600
 AUTO_UPDATE_RETRY_SECONDS = 300
 AUTO_UPDATE_RETRY_WINDOW_SECONDS = 3600
@@ -64,7 +65,6 @@ _auto_update_hour: int | None = None
 _auto_update_history: list[dict[str, object]] = []
 _auto_update_active_since: str | None = None
 _auto_update_wake_event: asyncio.Event | None = None
-sync_events = SyncEvents()
 SYNC_EVENT_HEARTBEAT_SECONDS = 15
 SYNC_EVENT_BATCH_SECONDS = 0.1
 
@@ -258,7 +258,7 @@ async def lifespan(app: FastAPI):
     certificate_task: asyncio.Task[None] | None = None
     
     global diagnostic_logs, alert_manager, filter_cleanup, cleanup_inventory_job
-    cleanup_inventory_job = InventoryJob()
+    cleanup_inventory_job = InventoryJob(on_change=lambda: sync_events.publish("cleanup-status"))
     filter_cleanup = None
     diagnostic_logs, attached = install_logging()
     alert_manager = AlertManager(Path(os.getenv("HUSHCLIENT_ALERT_SETTINGS_PATH", "filters/.alerts.json")))
@@ -1021,14 +1021,18 @@ async def _sync_event_stream(request: Request):
     # Subscribe before reading snapshots so a concurrent change cannot be missed.
     with sync_events.subscribe() as changed:
         yield "retry: 3000\n\n"
-        topics = {"sync-status", "auto-update"}
+        topics = {"sync-status", "auto-update", "cleanup-status"}
         while not await request.is_disconnected():
-            for topic in ("auto-update", "sync-status"):
+            for topic in ("auto-update", "sync-status", "cleanup-status"):
                 if topic not in topics:
                     continue
-                payload = (SyncStatusResponse(**sync_operation_logs.snapshot()) if topic == "sync-status"
-                           else AutoUpdateStatusResponse(**_auto_update_status_snapshot()))
-                yield f"event: {topic}\ndata: {payload.model_dump_json()}\n\n"
+                if topic == "cleanup-status":
+                    data = json.dumps(cleanup_inventory_job.snapshot())
+                else:
+                    payload = (SyncStatusResponse(**sync_operation_logs.snapshot()) if topic == "sync-status"
+                               else AutoUpdateStatusResponse(**_auto_update_status_snapshot()))
+                    data = payload.model_dump_json()
+                yield f"event: {topic}\ndata: {data}\n\n"
             try:
                 await asyncio.wait_for(changed.wait(), timeout=SYNC_EVENT_HEARTBEAT_SECONDS)
             except asyncio.TimeoutError:

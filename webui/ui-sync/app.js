@@ -376,12 +376,13 @@ function closeSyncEventStream() {
   syncEventSource = null;
   syncStreamAvailable = false;
   latestSyncStatus = null;
+  latestCleanupStatus = null;
   window.clearTimeout(syncConnectTimer);
   wakeSyncStatusWaiters();
 }
 
 function startSyncEventStream() {
-  if (syncEventSource || (document.hidden && !localOperationRunning) || typeof window.EventSource !== "function") return;
+  if (syncEventSource || (document.hidden && !localOperationRunning && !cleanupRefreshRequestsScan) || typeof window.EventSource !== "function") return;
   let source;
   try {
     source = new window.EventSource("/sync/events");
@@ -393,19 +394,23 @@ function startSyncEventStream() {
   // A proxy that never completes the handshake must not leave the UI stale.
   let receivedStatus = false;
   let receivedSchedule = false;
+  let receivedCleanup = false;
   const awaitSnapshots = () => {
     receivedStatus = false;
     receivedSchedule = false;
+    receivedCleanup = false;
     window.clearTimeout(syncConnectTimer);
     syncConnectTimer = window.setTimeout(() => {
       if (source !== syncEventSource) return;
       syncStreamAvailable = false;
       void pollLiveStatus();
       void refreshAutoUpdateStatus();
+      wakeSyncStatusWaiters();
+      void loadCleanupInventory();
     }, 5000);
   };
   const receivedSnapshot = () => {
-    if (!receivedStatus || !receivedSchedule) return;
+    if (!receivedStatus || !receivedSchedule || !receivedCleanup) return;
     syncStreamAvailable = true;
     window.clearTimeout(syncConnectTimer);
   };
@@ -414,6 +419,7 @@ function startSyncEventStream() {
     if (source !== syncEventSource) return;
     awaitSnapshots();
     latestSyncStatus = null;
+    latestCleanupStatus = null;
     syncStreamAvailable = true;
   };
   source.addEventListener("sync-status", event => {
@@ -432,6 +438,16 @@ function startSyncEventStream() {
       receivedSnapshot();
     } catch (_err) { source.onerror(); }
   });
+  source.addEventListener("cleanup-status", event => {
+    if (source !== syncEventSource) return;
+    try {
+      latestCleanupStatus = JSON.parse(event.data);
+      renderCleanupInventoryStatus(latestCleanupStatus);
+      receivedCleanup = true;
+      receivedSnapshot();
+      wakeSyncStatusWaiters();
+    } catch (_err) { source.onerror(); }
+  });
   source.onerror = () => {
     if (source !== syncEventSource) return;
     syncStreamAvailable = false;
@@ -439,6 +455,7 @@ function startSyncEventStream() {
     wakeSyncStatusWaiters();
     void pollLiveStatus();
     void refreshAutoUpdateStatus();
+    void loadCleanupInventory();
     // EventSource reconnects automatically; fresh snapshots restore the UI.
   };
 }
@@ -543,16 +560,20 @@ async function waitForOperationCompletion(expectedOperation) {
         return payload;
       }
     }
-    await new Promise(resolve => {
-      const wake = () => {
-        window.clearTimeout(timer);
-        syncStatusWaiters.delete(wake);
-        resolve();
-      };
-      const timer = window.setTimeout(wake, 1000);
-      syncStatusWaiters.add(wake);
-    });
+    await waitForStreamChange();
   }
+}
+
+function waitForStreamChange() {
+  return new Promise(resolve => {
+    const wake = () => {
+      window.clearTimeout(timer);
+      syncStatusWaiters.delete(wake);
+      resolve();
+    };
+    const timer = window.setTimeout(wake, 1000);
+    syncStatusWaiters.add(wake);
+  });
 }
 
 function scrollToProgress() {
@@ -597,7 +618,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     setButtonsDisabled(false);
     await pollLiveStatus();
     await loadCleanupInventory();
-    if (document.hidden) closeSyncEventStream();
+    if (document.hidden && !cleanupRefreshRequestsScan) closeSyncEventStream();
   }
 }
 
@@ -645,11 +666,12 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     setButtonsDisabled(false);
     await pollLiveStatus();
     await loadCleanupInventory();
-    if (document.hidden) closeSyncEventStream();
+    if (document.hidden && !cleanupRefreshRequestsScan) closeSyncEventStream();
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  startSyncEventStream();
   void loadCleanupSettings();
   void loadCleanupInventory();
   window.setInterval(() => { if (!document.hidden) void loadCleanupInventory(); }, 5000);
@@ -658,13 +680,12 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("cleanup-mode").addEventListener("change", syncCleanupDaysAvailability);
   document.getElementById("cleanup-form").addEventListener("submit", saveCleanupSettings);
   document.getElementById("cleanup-refresh").addEventListener("click", loadCleanupSettings);
-  startSyncEventStream();
   startLiveLogPolling();
   refreshLoadedCount();
   void refreshAutoUpdateStatus();
   window.setInterval(tickScheduleClock, 1000);
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden && !localOperationRunning) closeSyncEventStream();
+    if (document.hidden && !localOperationRunning && !cleanupRefreshRequestsScan) closeSyncEventStream();
     else if (!document.hidden) startSyncEventStream();
   });
   window.addEventListener("pagehide", closeSyncEventStream);
@@ -753,8 +774,10 @@ function showCleanupInventory(inventory) {
 let cleanupRefreshPromise = null;
 let cleanupRefreshRequestsScan = false;
 let cleanupStatusSignature = null;
+let latestCleanupStatus = null;
 
 function loadCleanupInventory() {
+  if (syncStreamAvailable) return Promise.resolve(cleanupInventory);
   return refreshCleanupInventory(false);
 }
 
@@ -774,58 +797,94 @@ function refreshCleanupInventory(requestScan = true) {
 }
 
 async function runCleanupInventoryRefresh(requestScan) {
-  const message = document.getElementById("cleanup-files-message");
-  const refresh = document.getElementById("cleanup-files-refresh");
-  const deleteButton = document.getElementById("cleanup-delete");
-  function scanning() {
-    refresh.disabled = true;
-    refresh.textContent = "Scanning…";
-    deleteButton.disabled = true;
-    message.textContent = "Scanning superseded filters (waiting for any running filter operation). Previous totals remain visible.";
-    message.className = "status";
-  }
-  if (requestScan) scanning();
+  if (requestScan) showCleanupScanning();
   try {
     let response = await fetch(requestScan ? "/sync/cleanup/files/refresh" : "/sync/cleanup/files/status",
       requestScan ? { method: "POST" } : { cache: "no-store" });
     let status = await readResponsePayload(response);
     if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
-    const signature = JSON.stringify(status);
-    if (!requestScan && !status.active && signature === cleanupStatusSignature) return cleanupInventory;
-    for (;;) {
-      if (status.inventory) showCleanupInventory(status.inventory);
-      setText("cleanup-checked-at", status.checked_at ? formatHistoryTime(status.checked_at) : "Never checked");
-      if (!status.active) break;
-      scanning();
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      response = await fetch("/sync/cleanup/files/status", { cache: "no-store" });
-      status = await readResponsePayload(response);
-      if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
+    if (requestScan && syncStreamAvailable) {
+      // Initial snapshots from this subscription follow the accepted refresh,
+      // so an old cached completion cannot satisfy a newly requested scan.
+      closeSyncEventStream();
+      startSyncEventStream();
+    } else if (syncStreamAvailable) {
+      // An older fallback response must not overwrite a recovered stream.
+      if (!latestCleanupStatus) return cleanupInventory;
+      status = latestCleanupStatus;
     }
-    cleanupStatusSignature = JSON.stringify(status);
-    if (status.error) throw new Error(status.error);
-    if (!status.inventory) {
-      cleanupInventory = null;
-      message.textContent = "No cached totals. Use Refresh file totals to check.";
-      message.className = "status";
-      return null;
+    renderCleanupInventoryStatus(status, requestScan);
+    while (status.active) {
+      if (syncStreamAvailable) {
+        if (latestCleanupStatus && latestCleanupStatus !== status) status = latestCleanupStatus;
+        else {
+          await waitForStreamChange();
+          continue;
+        }
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Streaming may have recovered during the fallback delay.
+        if (syncStreamAvailable) continue;
+        response = await fetch("/sync/cleanup/files/status", { cache: "no-store" });
+        const fallbackStatus = await readResponsePayload(response);
+        if (!response.ok) throw new Error(fallbackStatus.detail || "Could not read file totals scan status");
+        if (syncStreamAvailable) {
+          if (!latestCleanupStatus) continue;
+          status = latestCleanupStatus;
+        } else status = fallbackStatus;
+      }
+      renderCleanupInventoryStatus(status, requestScan);
     }
-    if (document.getElementById("cleanup-mode").disabled) void loadCleanupSettings();
-    message.textContent = requestScan ? "File totals refreshed." : "Showing the last checked file totals.";
-    message.className = "status ok";
-    return status.inventory;
+    return cleanupInventory;
   } catch (error) {
-    cleanupStatusSignature = null;
-    cleanupInventory = null;
-    // Keep the previous numbers visible, but never permit deletion using a stale token.
-    message.textContent = `${error.message || String(error)} Previous totals may be out of date.`;
-    message.className = "status bad";
+    showCleanupError(error.message || String(error));
     return null;
   } finally {
-    refresh.disabled = cleanupDeleteRunning;
-    refresh.textContent = "Refresh file totals";
-    deleteButton.disabled = cleanupDeleteRunning || !cleanupInventory || cleanupInventory.filter_count === 0;
+    if (document.hidden && !localOperationRunning) closeSyncEventStream();
   }
+}
+
+function showCleanupScanning() {
+  document.getElementById("cleanup-files-refresh").disabled = true;
+  document.getElementById("cleanup-files-refresh").textContent = "Scanning…";
+  document.getElementById("cleanup-delete").disabled = true;
+  setText("cleanup-files-message", "Scanning superseded filters (waiting for any running filter operation). Previous totals remain visible.");
+  document.getElementById("cleanup-files-message").className = "status";
+}
+
+function showCleanupError(error) {
+  cleanupStatusSignature = null;
+  cleanupInventory = null;
+  // Keep previous totals visible, but never permit deletion using a stale token.
+  setText("cleanup-files-message", `${error} Previous totals may be out of date.`);
+  document.getElementById("cleanup-files-message").className = "status bad";
+  document.getElementById("cleanup-files-refresh").disabled = cleanupDeleteRunning;
+  document.getElementById("cleanup-files-refresh").textContent = "Refresh file totals";
+  document.getElementById("cleanup-delete").disabled = true;
+}
+
+function renderCleanupInventoryStatus(status, requestScan = false) {
+  const signature = JSON.stringify(status);
+  if (!requestScan && signature === cleanupStatusSignature) return;
+  cleanupStatusSignature = signature;
+  if (status.inventory) showCleanupInventory(status.inventory);
+  setText("cleanup-checked-at", status.checked_at ? formatHistoryTime(status.checked_at) : "Never checked");
+  if (status.active) {
+    showCleanupScanning();
+    return;
+  }
+  if (status.error) {
+    showCleanupError(status.error);
+    return;
+  }
+  if (!status.inventory) cleanupInventory = null;
+  document.getElementById("cleanup-files-refresh").disabled = cleanupDeleteRunning;
+  document.getElementById("cleanup-files-refresh").textContent = "Refresh file totals";
+  document.getElementById("cleanup-delete").disabled = cleanupDeleteRunning || !cleanupInventory || cleanupInventory.filter_count === 0;
+  if (document.getElementById("cleanup-mode").disabled) void loadCleanupSettings();
+  setText("cleanup-files-message", !status.inventory ? "No cached totals. Use Refresh file totals to check."
+    : (requestScan ? "File totals refreshed." : "Showing the last checked file totals."));
+  document.getElementById("cleanup-files-message").className = status.inventory ? "status ok" : "status";
 }
 
 async function deleteSupersededFilters() {
