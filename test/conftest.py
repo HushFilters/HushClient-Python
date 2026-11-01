@@ -10,3 +10,4 @@ def isolate_alert_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("HUSHCLIENT_FILTER_CLEANUP_STATE_PATH", str(tmp_path / "cleanup.json"))
     monkeypatch.setenv("HUSHCLIENT_ACTIVE_MANIFEST_PATH", str(tmp_path / "active.json"))
     monkeypatch.setenv("HUSHCLIENT_PENDING_MANIFEST_PATH", str(tmp_path / "pending.json"))
+    monkeypatch.setenv("HUSHCLIENT_SYNC_SETTINGS_PATH", str(tmp_path / "sync-settings.json"))

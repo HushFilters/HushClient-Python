@@ -10,6 +10,9 @@ filters/.cleanup_state.json
 filters/.cleanup_state.tmp
 filters/.active_manifest.json
 filters/.pending_manifest.json
+filters/.sync_settings.json
+filters/.verified_md5.json
+filters/.*.part
 filters/.*.tmp
 filters/.generations/
 manifest.json

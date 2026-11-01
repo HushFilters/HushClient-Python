@@ -11,7 +11,7 @@ from pathlib import Path
 
 from core.hash import credential_digest
 from core.main import HushFilter
-from .sync import SyncError, calculate_md5
+from .sync import SyncError, calculate_md5, file_metadata
 
 CANARIES = tuple((f"testusername{i}@nwebbed.com", f"testpassword{i}") for i in range(1, 5))
 
@@ -89,9 +89,7 @@ def stage_sync(sync, loaded_paths):
     payload = {
         "version": "1.0", "filters": sorted(files),
         "source_manifest": json.loads(result.manifest_path.read_text(encoding="utf-8")),
-        "verified_files": {manifest_name(entry.path): {
-            "md5": entry.md5, "size": entry.size, "mtime_ns": entry.mtime_ns,
-        } for entry in result.verified_filters},
+        "verified_files": {manifest_name(entry.path): entry.record() for entry in result.verified_filters},
     }
     atomic_json(pending_path(), payload)
     return result
@@ -105,6 +103,9 @@ def check_identities(payload):
         info = Path(raw).stat()
         if (info.st_size, info.st_mtime_ns) != (expected["size"], expected["mtime_ns"]):
             raise SyncError(f"Candidate filter changed after verification: {raw}")
+        for key, actual in (("device", info.st_dev), ("inode", info.st_ino), ("ctime_ns", info.st_ctime_ns)):
+            if expected.get(key) is not None and expected[key] != actual:
+                raise SyncError(f"Candidate filter identity changed after verification: {raw}")
 
 
 def verify_manual_manifest(payload, progress):
@@ -123,12 +124,13 @@ def verify_manual_manifest(payload, progress):
         before = path.stat()
         digest = calculate_md5(path)
         after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        if file_metadata(before) != file_metadata(after):
             raise SyncError(f"Filter changed during verification: {raw}")
         expected = previous.get(raw, {}).get("md5") or expected_md5.get(path.parent.name + "/" + path.name)
         if expected and digest != expected:
             raise SyncError(f"Filter MD5 mismatch for {raw}")
-        records[raw] = {"md5": digest, "size": after.st_size, "mtime_ns": after.st_mtime_ns}
+        records[raw] = {"md5": digest, "size": after.st_size, "mtime_ns": after.st_mtime_ns,
+                        "device": after.st_dev, "inode": after.st_ino, "ctime_ns": after.st_ctime_ns}
     result = {**payload, "verified_files": records}
     if source is not None:
         result["source_manifest"] = source

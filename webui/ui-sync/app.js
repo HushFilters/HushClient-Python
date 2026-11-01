@@ -672,6 +672,9 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
 
 window.addEventListener("DOMContentLoaded", () => {
   startSyncEventStream();
+  void loadSyncSettings();
+  document.getElementById("sync-settings-form").addEventListener("submit", saveSyncSettings);
+  document.getElementById("sync-settings-refresh").addEventListener("click", loadSyncSettings);
   void loadCleanupSettings();
   void loadCleanupInventory();
   window.setInterval(() => { if (!document.hidden) void loadCleanupInventory(); }, 5000);
@@ -928,6 +931,51 @@ function syncCleanupDaysAvailability() {
   const retained = document.getElementById("cleanup-mode").value === "retained";
   document.getElementById("cleanup-days").disabled = !retained;
   document.getElementById("cleanup-days-field").hidden = !retained;
+}
+
+function showSyncSettings(settings) {
+  document.getElementById("reuse-verified-md5").checked = settings.reuse_verified_md5 === true;
+  document.getElementById("reuse-verified-md5").disabled = false;
+  document.getElementById("sync-settings-save").disabled = false;
+}
+
+async function loadSyncSettings() {
+  const message = document.getElementById("sync-settings-message");
+  try {
+    const response = await fetch("/sync/settings", { cache: "no-store" });
+    const settings = await readResponsePayload(response);
+    if (!response.ok) throw new Error(settings.detail || "Could not load verification setting");
+    showSyncSettings(settings);
+    message.textContent = "";
+    message.className = "status";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  }
+}
+
+async function saveSyncSettings(event) {
+  event.preventDefault();
+  const button = document.getElementById("sync-settings-save");
+  const message = document.getElementById("sync-settings-message");
+  button.disabled = true;
+  try {
+    const response = await fetch("/sync/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reuse_verified_md5: document.getElementById("reuse-verified-md5").checked }),
+    });
+    const settings = await readResponsePayload(response);
+    if (!response.ok) throw new Error(settings.detail || "Could not save verification setting");
+    showSyncSettings(settings);
+    message.textContent = "Verification setting saved. Applies to the next sync and survives restarts.";
+    message.className = "status ok";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function showCleanupSettings(settings) {

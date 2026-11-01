@@ -174,6 +174,29 @@ def test_verified_current_group_is_reused_without_copy_or_download(monkeypatch, 
     assert all(Path(path).parent == directory for path, _ in api.filter_manager.filters)
 
 
+def test_opt_in_reuses_md5_across_full_apply_without_rehashing_at_reload(monkeypatch, installation, public_key):
+    from filter_sync import sync as sync_module
+    from filter_sync.settings import SyncSettings, save_settings
+
+    def downloader():
+        return remote_group("20260101", "20260901", group_bytes(public_key, "20260101", "20260901"))
+
+    first = run_apply(monkeypatch, installation, downloader())
+    assert first.success, first.detail
+    save_settings(SyncSettings(reuse_verified_md5=True))
+
+    def unexpected_hash(path):
+        pytest.fail(f"Unchanged file was rehashed: {path}")
+
+    monkeypatch.setattr(sync_module, "calculate_md5", unexpected_hash)
+    monkeypatch.setattr(activation, "calculate_md5", unexpected_hash)
+    remote = downloader()
+    second = run_apply(monkeypatch, installation, remote)
+    assert second.success, second.detail
+    assert not remote.file_requests
+    assert len(api.filter_manager.filters) == 256
+
+
 def test_publish_failure_keeps_old_reader_and_manifest(monkeypatch, installation, public_key):
     _, previous, _, cleanup = installation
     original = activation.atomic_json

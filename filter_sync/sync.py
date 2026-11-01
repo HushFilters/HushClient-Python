@@ -16,6 +16,7 @@ import requests
 
 from .r2_client import R2Client, R2ClientError, R2Config
 from .progress import report, segment
+from .settings import load_settings
 from helpers.generate_manifest import _build_location_map, _resolve_manifest_filter_path
 
 DEFAULT_BUCKET = "hushfilters"
@@ -24,6 +25,7 @@ REMOTE_MANIFEST_NAME = "manifest_current.json"
 REMOTE_UPLOAD_MANIFEST_NAME = "upload_manifest.json"
 LOCAL_FILTER_VERIFICATION_LOG_INTERVAL = 5
 LOCAL_FILTER_EXTRACTION_LOG_INTERVAL = 25
+VERIFICATION_METADATA_FIELDS = ("device", "inode", "size", "mtime_ns", "ctime_ns")
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +145,33 @@ class VerifiedFilter:
     md5: str
     size: int
     mtime_ns: int
+    device: int | None = None
+    inode: int | None = None
+    ctime_ns: int | None = None
+
+    def record(self) -> dict:
+        return {"md5": self.md5, "size": self.size, "mtime_ns": self.mtime_ns,
+                "device": self.device, "inode": self.inode, "ctime_ns": self.ctime_ns}
+
+
+def file_metadata(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _verification_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve()))
+
+
+def _load_verification_records(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("version") == 1 and isinstance(payload.get("files"), dict):
+            return payload["files"]
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, AttributeError):
+        logger.warning("Could not read MD5 verification records; rehashing filters", exc_info=True)
+    return {}
 
 
 @dataclass(frozen=True)
@@ -169,6 +198,7 @@ def sync_filters(
     downloader: ObjectDownloader | None = None,
     staging_dir: Path | None = None,
     reuse_locations: dict[str, Path] | None = None,
+    reuse_verified_md5: bool | None = None,
 ) -> SyncResult:
     resolved_base_dir = (
         base_dir if base_dir is not None else Path(__file__).resolve().parent
@@ -188,6 +218,15 @@ def sync_filters(
     remote_manifest_key = f"{REMOTE_FILTERS_PREFIX}/{REMOTE_MANIFEST_NAME}"
     manifest_payload = active_downloader.download_text(remote_manifest_key)
     manifest = FilterManifest.from_json(manifest_payload)
+    if reuse_verified_md5 is None:
+        reuse_verified_md5 = load_settings(project_root / "filters").reuse_verified_md5
+    records_path = project_root / "filters" / ".verified_md5.json"
+    records = _load_verification_records(records_path) if reuse_verified_md5 else {}
+    logger.info("Existing filter MD5 verification: %s",
+                "reuse matching verification records" if reuse_verified_md5 else "rehash every file")
+    # A failed/interrupted sync must not leave cached trust in a file whose
+    # verification failed. Republish records only after the entire sync succeeds.
+    _write_text_atomic(records_path, json.dumps({"version": 1, "files": {}}))
     report("prepare", 1, 1, status="complete")
 
     downloaded: list[Path] = []
@@ -212,7 +251,7 @@ def sync_filters(
         with segment("download", check_step, total_steps, label):
             if staging_dir is not None:
                 source = (reuse_locations or {}).get(entry.path.parent.as_posix())
-                reused = _verify_reusable_location(manifest, entry, source) if source else None
+                reused = _verify_reusable_location(manifest, entry, source, records) if source else None
                 local_filters_match = reused is not None
                 if reused is not None:
                     verified_filters.extend(reused)
@@ -222,6 +261,8 @@ def sync_filters(
                     downloader=active_downloader,
                     local_zip_path=local_zip_path,
                     zip_manifest_path=entry.path,
+                    records=records,
+                    verified=verified_filters,
                 )
         if local_filters_match:
             logger.info(
@@ -261,7 +302,7 @@ def sync_filters(
         report("verify", index, count, label)
         with segment("verify", index, count, label):
             _verify_filters_for_downloaded_zip(manifest=manifest, zip_path=zip_path,
-                                              verified=verified_filters if staging_dir else None)
+                                              verified=verified_filters)
         report("verify", index + 1, count, label,
                status="complete" if index + 1 == count else "pending")
         zip_path.unlink()
@@ -286,6 +327,9 @@ def sync_filters(
     # Publish only a fully verified sync; failed downloads must not select a
     # partial replacement set for manifest generation and cleanup.
     _write_text_atomic(manifest_path, manifest_payload)
+    _write_text_atomic(records_path, json.dumps({"version": 1, "files": {
+        _verification_key(entry.path): entry.record() for entry in verified_filters
+    }}))
 
     return SyncResult(
         manifest_path=manifest_path,
@@ -297,17 +341,29 @@ def sync_filters(
     )
 
 
-def _verified_filter(path: Path, expected_md5: str) -> VerifiedFilter:
+def _verified_filter(path: Path, expected_md5: str, cached: dict | None = None) -> VerifiedFilter:
     before = path.stat()
-    if calculate_md5(path) != expected_md5:
-        raise SyncError(f"Filter MD5 mismatch for {path}")
+    # Filesystems without a stable file ID cannot use cached verification.
+    if (isinstance(cached, dict) and before.st_ino != 0 and cached.get("md5") == expected_md5
+            and all(type(cached.get(key)) is int for key in VERIFICATION_METADATA_FIELDS)
+            and file_metadata(before) == tuple(cached[key] for key in VERIFICATION_METADATA_FIELDS)):
+        logger.debug("Reusing verified MD5 for %s", path)
+        return _verified_record(path, expected_md5, before)
+    actual_md5 = calculate_md5(path)
+    if actual_md5 != expected_md5:
+        raise SyncError(f"Filter MD5 mismatch for {path}: expected {expected_md5}, got {actual_md5}")
     after = path.stat()
-    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+    if file_metadata(before) != file_metadata(after):
         raise SyncError(f"Filter changed during verification: {path}")
-    return VerifiedFilter(path, expected_md5, after.st_size, after.st_mtime_ns)
+    return _verified_record(path, expected_md5, after)
 
 
-def _verify_reusable_location(manifest, archive, source):
+def _verified_record(path: Path, md5: str, info: os.stat_result) -> VerifiedFilter:
+    return VerifiedFilter(path, md5, info.st_size, info.st_mtime_ns,
+                          info.st_dev, info.st_ino, info.st_ctime_ns)
+
+
+def _verify_reusable_location(manifest, archive, source, records=None):
     expected = manifest.filter_files_for_location(archive.path.parent.name)
     if not expected:
         return None
@@ -315,7 +371,8 @@ def _verify_reusable_location(manifest, archive, source):
     try:
         for index, entry in enumerate(expected):
             report("download", index, len(expected), f"Verifying reusable file {index + 1}/{len(expected)}")
-            verified.append(_verified_filter(_resolve_filter_output_path(source, entry.path), entry.md5))
+            path = _resolve_filter_output_path(source, entry.path)
+            verified.append(_verified_filter(path, entry.md5, (records or {}).get(_verification_key(path))))
         return verified
     except (OSError, SyncError):
         logger.warning("Existing location %s failed verification; downloading an isolated replacement", source)
@@ -502,6 +559,8 @@ def _location_filters_match_remote_manifest(
     downloader: ObjectDownloader,
     local_zip_path: Path,
     zip_manifest_path: PurePosixPath,
+    records: dict | None = None,
+    verified: list[VerifiedFilter] | None = None,
 ) -> bool:
     upload_manifest_key = (
         f"{REMOTE_FILTERS_PREFIX}/"
@@ -537,6 +596,7 @@ def _location_filters_match_remote_manifest(
 
     location_dir = local_zip_path.parent
     total_filters = len(upload_manifest.filter_files)
+    checked_filters = []
     report("download", 0, total_filters, f"Checking local filters: 0/{total_filters} verified")
     for completed_checks, entry in enumerate(upload_manifest.filter_files, start=1):
         target_path = _resolve_filter_output_path(location_dir, entry.path)
@@ -551,16 +611,17 @@ def _location_filters_match_remote_manifest(
                 reason="local_filter_missing",
             )
             return False
-        actual_md5 = calculate_md5(target_path)
-        if actual_md5 != entry.md5:
+        try:
+            checked_filters.append(_verified_filter(target_path, entry.md5,
+                (records or {}).get(_verification_key(target_path))))
+        except (OSError, SyncError) as exc:
             _log_upload_manifest_check_failure(
                 zip_path=local_zip_path,
                 upload_manifest_key=upload_manifest_key,
                 target_path=target_path,
                 manifest_filter_path=entry.path,
                 expected_md5=entry.md5,
-                actual_md5=actual_md5,
-                reason="local_filter_md5_mismatch",
+                reason=f"local_filter_verification_failed: {exc}",
             )
             return False
         report("download", completed_checks, total_filters,
@@ -570,6 +631,8 @@ def _location_filters_match_remote_manifest(
             completed_checks=completed_checks,
             total_checks=total_filters,
         )
+    if verified is not None:
+        verified.extend(checked_filters)
     return True
 
 
@@ -622,10 +685,10 @@ def _verify_filters_for_downloaded_zip(
             continue
         successful_checks += 1
         after = target_path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        if file_metadata(before) != file_metadata(after):
             raise SyncError(f"Filter changed during verification: {target_path}")
         if verified is not None:
-            verified.append(VerifiedFilter(target_path, entry.md5, after.st_size, after.st_mtime_ns))
+            verified.append(_verified_record(target_path, entry.md5, after))
         report("verify", checked, total_filters, f"{checked}/{total_filters} files checked")
         if not failures:
             _log_local_filter_verification_progress(
@@ -932,6 +995,12 @@ def _parse_args() -> argparse.Namespace:
         help="Optional path to an env file containing R2 credentials",
     )
     parser.add_argument(
+        "--reuse-verified-md5",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Reuse verified MD5s for unchanged files (default: saved sync setting, otherwise off)",
+    )
+    parser.add_argument(
         "--bucket",
         default=DEFAULT_BUCKET,
         help=f"R2 bucket name. Defaults to {DEFAULT_BUCKET}.",
@@ -947,6 +1016,7 @@ def main() -> int:
             base_dir=args.base_dir,
             env_path=args.env_file,
             bucket=args.bucket,
+            reuse_verified_md5=args.reuse_verified_md5,
         )
     except (R2ClientError, SyncError) as exc:
         print(f"Sync failed: {exc}")

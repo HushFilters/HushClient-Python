@@ -34,6 +34,7 @@ from filter_sync import progress as sync_progress
 from filter_sync.cleanup import CleanupSettings, FilterCleanup
 from filter_sync.inventory_job import InventoryJob
 from filter_sync import activation
+from filter_sync.settings import SyncSettings, load_settings as load_sync_settings, save_settings as save_sync_settings
 from fastapi.openapi.docs import get_swagger_ui_html
 from helpers.generate_manifest import generate_manifest, _build_location_map, _resolve_manifest_filter_path
 
@@ -586,6 +587,7 @@ async def endpoints():
             "sync_status": "/sync/status",
             "sync_events": "/sync/events",
             "auto_update": "/sync/auto-update",
+            "sync_settings": "/sync/settings",
             "filter_cleanup": "/sync/cleanup",
             "superseded_filters": "/sync/cleanup/files",
             "delete_superseded_filters": "/sync/cleanup/delete",
@@ -1051,6 +1053,23 @@ async def sync_events_endpoint(request: Request):
         "Cache-Control": "no-cache, no-transform",
         "X-Accel-Buffering": "no",
     })
+
+
+@app.get("/sync/settings", response_model=SyncSettings, tags=["Sync"])
+async def get_sync_settings():
+    return await run_in_threadpool(load_sync_settings)
+
+
+@app.put("/sync/settings", response_model=SyncSettings, tags=["Sync"])
+async def configure_sync_settings(settings: SyncSettings):
+    if not operation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A filter operation is in progress; try again when it finishes")
+    try:
+        return await run_in_threadpool(save_sync_settings, settings)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not save sync settings") from exc
+    finally:
+        operation_lock.release()
 
 
 @app.get("/sync/cleanup", response_model=CleanupSettings, tags=["Sync"])

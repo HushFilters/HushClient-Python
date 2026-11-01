@@ -70,6 +70,32 @@
 
         <section class="surface-card auto-update-card">
           <div class="surface-card__inner auto-update-card__inner">
+            <div>
+              <p class="section-eyebrow">Verification</p>
+              <h2 class="sync-section-heading">Filter MD5 Verification</h2>
+              <p class="section-copy">By default, every sync rehashes existing filters. Newly downloaded filters are always hashed and verified.</p>
+            </div>
+            <form id="sync-settings-form" class="auto-update-form">
+              <label class="toggle-field" for="reuse-verified-md5">
+                <input id="reuse-verified-md5" type="checkbox" disabled>
+                <span class="toggle-control" aria-hidden="true"></span>
+                <span>
+                  <strong>Reuse verified MD5 results</strong>
+                  <small>Skip rehashing only when the remote MD5, local file identity, size, and timestamps match a saved verification. Missing records or changed metadata force a rehash. Disabled by default.</small>
+                </span>
+              </label>
+              <p class="section-copy">Applies to manual and scheduled syncs. Reusing a saved result does not detect corruption that leaves file metadata unchanged.</p>
+              <div class="schedule-actions">
+                <button id="sync-settings-save" class="action-button" type="submit" disabled>Save verification setting</button>
+                <button id="sync-settings-refresh" class="action-button action-button--secondary" type="button">Refresh</button>
+              </div>
+              <p id="sync-settings-message" class="status" aria-live="polite"></p>
+            </form>
+          </div>
+        </section>
+
+        <section class="surface-card auto-update-card">
+          <div class="surface-card__inner auto-update-card__inner">
             <div class="auto-update-heading">
               <div>
                 <p class="section-eyebrow">Automation</p>
