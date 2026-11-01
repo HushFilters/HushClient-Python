@@ -1,8 +1,9 @@
 """Discover superseded date ranges and persist their retention policy."""
 from __future__ import annotations
 
-import json
+import errno
 import hashlib
+import json
 import logging
 import math
 import os
@@ -276,6 +277,26 @@ class FilterCleanup:
             "confirmation_token": hashlib.sha256(json.dumps(files).encode()).hexdigest(),
         }
 
+    def _remove_empty_build_directories(self, protected: set[str]) -> None:
+        protected_directories = {name.rpartition("/")[0] for name in protected}
+        for directory in self.build_directories(self.scan()):
+            if directory in protected_directories:
+                continue
+            path = self.root / directory
+            try:
+                # Recheck containment and linked ancestors immediately before removal.
+                if not path.resolve().is_relative_to(self.root) or not self.scan().directory(directory):
+                    continue
+                # Never recursively delete: files or subdirectories keep a build intact.
+                path.rmdir()
+                logger.info("Removed empty filter build directory %s", path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    logger.warning("Could not remove empty filter build directory %s; will retry", path,
+                                   exc_info=True)
+
     def cleanup(self, protected_paths, *, now: float | None = None, manual: bool = False) -> list[str]:
         if not manual and not self.settings.enabled:
             return []
@@ -303,4 +324,5 @@ class FilterCleanup:
                 logger.exception("Could not delete superseded filter %s; will retry", name)
         if retired != self.retired:
             self._save(self.settings, self.active, retired)
+        self._remove_empty_build_directories(protected)
         return deleted

@@ -149,6 +149,8 @@ def inspect_retained_groups(manager, root, log):
             continue
         try:
             names = scan.entries(directory)
+            if not names:
+                continue
             missing = {f"{i:02x}_{path.name}.hf" for i in range(256)} - names.keys()
             if missing:
                 raise SyncError(f"{len(missing)} shards missing")

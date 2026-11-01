@@ -305,6 +305,23 @@ def test_retained_broken_group_is_diagnostic_and_does_not_block_repair(monkeypat
     assert any("WARNING retained group" in line and "testusername4" in line for line in result.logs)
 
 
+@pytest.mark.parametrize("generation", [False, True])
+def test_retained_diagnostics_skip_empty_builds_but_warn_for_partial_groups(tmp_path, generation):
+    root = tmp_path / "filters"
+    build_root = root / ".generations" / ("a" * 32) if generation else root
+    empty = build_root / "202604" / "20260401_20260408"
+    empty.mkdir(parents=True)
+    partial = build_root / "202605" / "20260501_20260508"
+    partial.mkdir(parents=True)
+    (partial / "00_20260501_20260508.hf").write_bytes(b"filter")
+    logs = []
+    manager = type("Manager", (), {"filters": []})()
+    activation.inspect_retained_groups(manager, root, logs.append)
+    assert len(logs) == 1
+    assert "20260501_20260508 failed diagnostic: 255 shards missing" in logs[0]
+    assert logs[0].startswith("WARNING retained group")
+
+
 def test_checksum_failure_leaves_live_files_and_cleanup_unchanged(monkeypatch, installation, public_key):
     _, previous, directory, cleanup = installation
     downloader = remote_group("20260101", "20261001", group_bytes(public_key, "20260101", "20261001"))
