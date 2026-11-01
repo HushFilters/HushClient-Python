@@ -1,5 +1,6 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,15 @@ from fastapi.testclient import TestClient
 
 import api
 from filter_sync.cleanup import CleanupSettings, FilterCleanup
+from filter_sync.inventory_job import InventoryJob
+
+
+@pytest.fixture(autouse=True)
+def isolate_inventory_job(monkeypatch):
+    job = InventoryJob()
+    monkeypatch.setattr(api, "cleanup_inventory_job", job)
+    yield job
+    job.join()
 
 
 @pytest.fixture
@@ -136,6 +146,9 @@ def test_partial_reload_preserves_previous_manager_and_files(setup_cleanup, monk
     monkeypatch.setattr(api, "filter_manager", previous)
     monkeypatch.setattr(api, "filter_cleanup", cleanup)
     monkeypatch.setattr(api, "FilterManager", lambda **kwargs: candidate)
+    monkeypatch.setattr(api.activation, "load_candidate", lambda current: (
+        Path("candidate.json"), {"filters": [str(new)], "verified_files": {}}, True))
+    monkeypatch.setattr(api.activation, "check_identities", lambda payload: None)
     result = api._run_filter_reload_with_logs()
     assert not result.success
     assert api.filter_manager is previous
@@ -161,6 +174,11 @@ def test_successful_reload_closes_old_mappings_before_immediate_cleanup(setup_cl
     monkeypatch.setattr(api, "filter_manager", previous)
     monkeypatch.setattr(api, "filter_cleanup", cleanup)
     monkeypatch.setattr(api, "FilterManager", lambda **kwargs: candidate)
+    monkeypatch.setattr(api.activation, "load_candidate", lambda current: (
+        Path("candidate.json"), {"filters": [str(new)], "verified_files": {}}, True))
+    monkeypatch.setattr(api.activation, "check_identities", lambda payload: None)
+    monkeypatch.setattr(api.activation, "validate_groups", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(api.activation, "inspect_retained_groups", lambda *args: None)
     monkeypatch.setattr(api, "_cleanup_protected_paths", lambda: [new])
     monkeypatch.delenv("HUSHFILTER_TEST_MODE", raising=False)
     result = api._run_filter_reload_with_logs()
@@ -231,7 +249,7 @@ def manual_client(setup_cleanup, monkeypatch):
     return TestClient(api.app), cleanup, old, new, untracked
 
 
-def test_inventory_and_confirmed_delete_work_with_automatic_cleanup_off(manual_client):
+def test_inventory_and_confirmed_delete_work_with_automatic_cleanup_off(manual_client, isolate_inventory_job):
     client, cleanup, old, new, untracked = manual_client
     inventory = client.get("/sync/cleanup/files").json()
     assert inventory["filter_count"] == 1
@@ -245,16 +263,22 @@ def test_inventory_and_confirmed_delete_work_with_automatic_cleanup_off(manual_c
     assert result.json()["filter_count"] == result.json()["total_bytes"] == 0
     assert not old.exists() and new.exists() and untracked.exists()
     assert not cleanup.settings.enabled
+    isolate_inventory_job.join()
+    snapshot = isolate_inventory_job.snapshot()
+    assert snapshot["inventory"]["filter_count"] == 0
+    assert snapshot["checked_at"] and snapshot["error"] is None
 
 
-def test_manual_delete_rejects_changed_set_and_concurrent_sync(manual_client):
+def test_manual_delete_waits_for_sync_and_rejects_changed_set(manual_client):
     client, cleanup, old, new, _ = manual_client
     token = client.get("/sync/cleanup/files").json()["confirmation_token"]
-    with api.operation_lock:
-        assert client.post("/sync/cleanup/delete", json={"confirmation_token": token}).status_code == 409
-        assert client.get("/sync/cleanup/files").status_code == 409
-    old.write_bytes(b"replacement download")
-    assert client.post("/sync/cleanup/delete", json={"confirmation_token": token}).status_code == 409
+    with ThreadPoolExecutor() as pool:
+        with api.operation_lock:
+            pending = pool.submit(client.post, "/sync/cleanup/delete", json={"confirmation_token": token})
+            assert client.get("/sync/cleanup/files").status_code == 409
+            assert not pending.done()
+            old.write_bytes(b"replacement download")
+        assert pending.result(timeout=5).status_code == 409
     assert old.exists() and new.exists()
     assert client.get("/sync/cleanup/files").json()["filter_count"] == 0
 
@@ -294,6 +318,74 @@ def dated_filter(root, start, end, shard="00"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"filter")
     return path
+
+
+@pytest.mark.parametrize("generation", [False, True])
+def test_cleanup_removes_empty_builds_after_last_shard_and_from_previous_runs(tmp_path, generation):
+    root = tmp_path / "filters"
+    build_root = root / ".generations" / ("a" * 32) if generation else root
+    old = dated_filter(build_root, "20260101", "20260901")
+    new = dated_filter(root, "20260101", "20261001")
+    leftover = build_root / "202604" / "20260401_20260408"
+    leftover.mkdir(parents=True)
+    cleanup = FilterCleanup(root, root / "state.json")
+    cleanup.loaded([new], now=100)
+
+    # Empty leftovers need no retirement record; retained shard files keep their folder.
+    assert cleanup.cleanup([new], now=100) == []
+    assert not leftover.exists() and old.parent.exists()
+    assert cleanup.cleanup([new], now=100 + 31 * 86400) == [old.relative_to(root).as_posix()]
+    assert not old.parent.exists()
+    assert new.exists() and build_root.exists()
+
+
+def test_empty_build_cleanup_preserves_protected_nonempty_and_unrecognized_folders(tmp_path):
+    root = tmp_path / "filters"
+    new = dated_filter(root, "20260101", "20261001")
+    active_missing = root / "202609" / "20260101_20260901" / "00_20260101_20260901.hf"
+    active_missing.parent.mkdir(parents=True)
+    nonempty = root / "202604" / "20260401_20260408"
+    nonempty.mkdir(parents=True)
+    (nonempty / "notes.txt").write_text("keep")
+    nested = root / "202605" / "20260501_20260508"
+    (nested / "child").mkdir(parents=True)
+    unknown = root / "202606" / "custom-build"
+    unknown.mkdir(parents=True)
+    cleanup = FilterCleanup(root, root / "state.json")
+    cleanup.loaded([new, active_missing], now=100)
+    # Also protect a missing shard in a pending manual reload's empty folder.
+    pending = root / "202607" / "20260701_20260708" / "00_20260701_20260708.hf"
+    pending.parent.mkdir(parents=True)
+    assert cleanup.cleanup([new, pending], manual=True) == []
+    assert all(path.is_dir() for path in (active_missing.parent, pending.parent, nonempty, nested, unknown))
+    assert (nonempty / "notes.txt").read_text() == "keep"
+
+
+def test_disabled_cleanup_leaves_empty_builds_until_manual_cleanup(tmp_path):
+    root = tmp_path / "filters"
+    empty = root / "202604" / "20260401_20260408"
+    empty.mkdir(parents=True)
+    cleanup = FilterCleanup(root, root / "state.json")
+    cleanup.configure(CleanupSettings(enabled=False))
+    assert cleanup.cleanup([]) == []
+    assert empty.is_dir()
+    assert cleanup.cleanup([], manual=True) == []
+    assert not empty.exists()
+
+
+def test_empty_build_cleanup_does_not_follow_linked_ancestors(tmp_path):
+    root = tmp_path / "filters"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    empty = outside / "20260401_20260408"
+    empty.mkdir(parents=True)
+    try:
+        (root / "202604").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlink creation is unavailable")
+    cleanup = FilterCleanup(root, root / "state.json")
+    assert cleanup.cleanup([], manual=True) == []
+    assert empty.is_dir()
 
 
 def test_october_ytd_discovers_existing_older_builds_without_load_history(tmp_path):

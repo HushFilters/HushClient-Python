@@ -4,6 +4,8 @@ HushFilter CLI for manifest-backed bloom filter operations.
 """
 import sys
 import argparse
+import os
+from pathlib import Path
 from core.hash import normalize_sha256_hex
 from core.filter_core import FilterManager
 
@@ -112,7 +114,7 @@ def main():
     parser.add_argument(
         '-m',
         '--manifest',
-        help='Path to manifest.json file (default: manifest.json)',
+        help='Manifest path (default: the validated active manifest, or manifest.json before first activation)',
     )
     parser.add_argument(
         '--test',
@@ -135,7 +137,8 @@ def main():
     if args.test:
         args.manifest = "test_manifest.json"
     elif not args.manifest:
-        args.manifest = "manifest.json"
+        active = Path(os.getenv("HUSHCLIENT_ACTIVE_MANIFEST_PATH", "filters/.active_manifest.json"))
+        args.manifest = str(active) if active.exists() else "manifest.json"
 
     if args.tsv and args.checkhash:
         parser.error("--checkhash cannot be used with --tsv")

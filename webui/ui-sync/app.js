@@ -1,7 +1,14 @@
+function setText(id, value) {
+  const element = document.getElementById(id);
+  const text = String(value);
+  if (element.textContent !== text) element.textContent = text;
+}
+
 function setStatus(message, variant = "") {
   const el = document.getElementById("sync-status");
-  el.textContent = message;
-  el.className = `status ${variant}`.trim();
+  setText("sync-status", message);
+  const className = `status ${variant}`.trim();
+  if (el.className !== className) el.className = className;
 }
 
 function prettyJson(value) {
@@ -9,17 +16,28 @@ function prettyJson(value) {
 }
 
 function setMetric(id, value) {
-  document.getElementById(id).textContent = String(value);
+  setText(id, value);
+}
+
+let loadedCountVersion = 0;
+
+function updateLoadedCount(count) {
+  if (!Number.isInteger(count) || count < 0) return false;
+  // An activation result supersedes any stats request already in flight.
+  loadedCountVersion++;
+  setMetric("loaded-count", count);
+  return true;
 }
 
 async function refreshLoadedCount() {
+  const requestVersion = ++loadedCountVersion;
   try {
-    const response = await fetch("/stats");
+    const response = await fetch("/stats", { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       return;
     }
-    setMetric("loaded-count", payload.filter_count || 0);
+    if (requestVersion === loadedCountVersion) updateLoadedCount(payload.filter_count);
   } catch (_err) {
     // Leave the existing metric value in place if stats cannot be fetched.
   }
@@ -27,7 +45,6 @@ async function refreshLoadedCount() {
 
 function renderOutput(payload) {
   renderProgress(payload);
-  const output = document.getElementById("sync-output");
   const lines = [];
 
   if (payload.detail) {
@@ -41,7 +58,7 @@ function renderOutput(payload) {
     lines.push(...payload.logs);
   }
 
-  output.textContent = lines.length > 0 ? lines.join("\n") : prettyJson(payload);
+  setText("sync-output", lines.length > 0 ? lines.join("\n") : prettyJson(payload));
 }
 
 function setButtonsDisabled(disabled) {
@@ -135,7 +152,11 @@ function historyOutcome(run) {
   return outcomes.join(" · ");
 }
 
+let lastHistorySignature = null;
 function renderAutoUpdateHistory(history, activeRun = null) {
+  const signature = JSON.stringify([history, activeRun]);
+  if (signature === lastHistorySignature) return;
+  lastHistorySignature = signature;
   const container = document.getElementById("auto-update-history");
   container.replaceChildren();
 
@@ -211,13 +232,15 @@ function syncAutoUpdateHourAvailability() {
   document.getElementById("auto-update-hour").disabled = !document.getElementById("auto-update-enabled").checked;
 }
 
-function renderAutoUpdateStatus(payload, applyFormValues = true) {
-  document.getElementById("machine-id").textContent = payload.machine_id || "Unavailable (no hardware MAC detected)";
-  document.getElementById("retry-status").textContent = payload.retry_at
-    ? `Next retry: ${formatScheduledTime(payload.retry_at)}. Retry window ends: ${formatScheduledTime(payload.retry_until)}.` : "";
+function renderAutoUpdateStatus(payload, applyFormValues = true, renderLiveLogs = true) {
+  updateScheduleClock(payload.current_time);
+  setText("machine-id", payload.machine_id || "Unavailable (no hardware MAC detected)");
+  setText("retry-status", payload.retry_at
+    ? `Next retry: ${formatScheduledTime(payload.retry_at)}. Retry window ends: ${formatScheduledTime(payload.retry_until)}.` : "");
   const badge = document.getElementById("auto-update-badge");
-  badge.textContent = payload.active ? "Running" : (payload.enabled ? "Enabled" : "Disabled");
-  badge.className = `schedule-badge ${(payload.enabled || payload.active) ? "schedule-badge--enabled" : ""}`.trim();
+  setText("auto-update-badge", payload.active ? "Running" : (payload.enabled ? "Enabled" : "Disabled"));
+  const badgeClass = `schedule-badge ${(payload.enabled || payload.active) ? "schedule-badge--enabled" : ""}`.trim();
+  if (badge.className !== badgeClass) badge.className = badgeClass;
 
   if (applyFormValues) {
     document.getElementById("auto-update-enabled").checked = payload.enabled === true;
@@ -227,9 +250,9 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
     syncAutoUpdateHourAvailability();
   }
 
-  document.getElementById("auto-update-next").textContent = formatNextScheduledTime(payload.next_update_at);
-  document.getElementById("auto-update-timezone").textContent = payload.timezone || "—";
-  document.getElementById("auto-update-current-time").textContent = formatScheduledTime(payload.current_time);
+  setText("auto-update-next", formatNextScheduledTime(payload.next_update_at));
+  setText("auto-update-timezone", payload.timezone || "—");
+  setText("auto-update-current-time", formatScheduledTime(payload.current_time));
   const activeRun = payload.active ? {
     triggered_at: payload.active_since,
     completed_at: payload.current_time,
@@ -241,10 +264,12 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
     redownloaded: [],
     verified_existing: [],
   } : null;
+  scheduleHistory = payload.history;
+  scheduleActiveRun = activeRun;
   renderAutoUpdateHistory(payload.history, activeRun);
 
   if (payload.active) {
-    renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
+    if (renderLiveLogs) renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
     setStatus("Scheduled filter update running…");
     autoUpdateWasActive = true;
   } else if (autoUpdateWasActive) {
@@ -252,7 +277,7 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
       ? payload.history.find((run) => run.trigger !== "manual")
       : null;
     if (completedRun) {
-      renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
+      if (renderLiveLogs) renderStatusLogs({ operation: "auto_sync_apply", logs: payload.live_logs || [] });
       setStatus(
         completedRun.status === "success" ? "Scheduled filter update complete" : "Scheduled filter update failed",
         completedRun.status === "success" ? "ok" : "bad",
@@ -264,7 +289,10 @@ function renderAutoUpdateStatus(payload, applyFormValues = true) {
   }
 }
 
-async function refreshAutoUpdateStatus() {
+let schedulePollBusy = false;
+async function refreshAutoUpdateStatus(force = false) {
+  if (schedulePollBusy || document.hidden || (syncStreamAvailable && !force)) return;
+  schedulePollBusy = true;
   try {
     const response = await fetch("/sync/auto-update", { cache: "no-store" });
     const payload = await readResponsePayload(response);
@@ -272,10 +300,10 @@ async function refreshAutoUpdateStatus() {
       setAutoUpdateMessage(payload.detail || `Could not load schedule (${response.status})`, "bad");
       return;
     }
-    renderAutoUpdateStatus(payload, !autoUpdateFormDirty);
+    if (!syncStreamAvailable || force) renderAutoUpdateStatus(payload, !autoUpdateFormDirty);
   } catch (err) {
     setAutoUpdateMessage(err instanceof Error ? err.message : String(err), "bad");
-  }
+  } finally { schedulePollBusy = false; }
 }
 
 async function saveAutoUpdateSchedule(event) {
@@ -315,10 +343,136 @@ async function saveAutoUpdateSchedule(event) {
 let liveLogPollTimer = null;
 let statusPollBusy = false;
 let localOperationRunning = false;
+let syncEventSource = null;
+let syncStreamAvailable = false;
+let syncConnectTimer = null;
+let latestSyncStatus = null;
+let syncStatusRequest = null;
+const syncStatusWaiters = new Set();
+let scheduleClock = null;
+let scheduleHistory = [];
+let scheduleActiveRun = null;
+
+function updateScheduleClock(value) {
+  const match = /([+-])(\d{2}):(\d{2})$/.exec(value || "");
+  const offsetMinutes = match ? (Number(match[2]) * 60 + Number(match[3])) * (match[1] === "-" ? -1 : 1) : 0;
+  const time = Date.parse(value);
+  if (Number.isFinite(time)) scheduleClock = { time, received: Date.now(), offsetMinutes, suffix: match ? match[0] : "Z" };
+}
+
+function tickScheduleClock() {
+  if (!scheduleClock || document.hidden) return;
+  const time = scheduleClock.time + Date.now() - scheduleClock.received + scheduleClock.offsetMinutes * 60000;
+  const currentTime = new Date(time).toISOString().slice(0, 19) + scheduleClock.suffix;
+  setText("auto-update-current-time", formatScheduledTime(currentTime));
+  if (scheduleActiveRun) {
+    scheduleActiveRun = { ...scheduleActiveRun, completed_at: currentTime };
+    renderAutoUpdateHistory(scheduleHistory, scheduleActiveRun);
+  }
+}
+
+function wakeSyncStatusWaiters() {
+  for (const wake of syncStatusWaiters) wake();
+  syncStatusWaiters.clear();
+}
+
+function receiveSyncStatus(payload) {
+  latestSyncStatus = payload;
+  wakeSyncStatusWaiters();
+  renderLiveStatus(payload);
+}
+
+function closeSyncEventStream() {
+  if (syncEventSource) syncEventSource.close();
+  syncEventSource = null;
+  syncStreamAvailable = false;
+  latestSyncStatus = null;
+  latestCleanupStatus = null;
+  window.clearTimeout(syncConnectTimer);
+  wakeSyncStatusWaiters();
+}
+
+function startSyncEventStream() {
+  if (syncEventSource || (document.hidden && !localOperationRunning && !cleanupRefreshRequestsScan) || typeof window.EventSource !== "function") return;
+  let source;
+  try {
+    source = new window.EventSource("/sync/events");
+  } catch (_err) {
+    return; // Existing polling remains available when streaming is unsupported.
+  }
+  syncEventSource = source;
+  syncStreamAvailable = true;
+  // A proxy that never completes the handshake must not leave the UI stale.
+  let receivedStatus = false;
+  let receivedSchedule = false;
+  let receivedCleanup = false;
+  const awaitSnapshots = () => {
+    receivedStatus = false;
+    receivedSchedule = false;
+    receivedCleanup = false;
+    window.clearTimeout(syncConnectTimer);
+    syncConnectTimer = window.setTimeout(() => {
+      if (source !== syncEventSource) return;
+      syncStreamAvailable = false;
+      void pollLiveStatus();
+      void refreshAutoUpdateStatus();
+      wakeSyncStatusWaiters();
+      void loadCleanupInventory();
+    }, 5000);
+  };
+  const receivedSnapshot = () => {
+    if (!receivedStatus || !receivedSchedule || !receivedCleanup) return;
+    syncStreamAvailable = true;
+    window.clearTimeout(syncConnectTimer);
+  };
+  awaitSnapshots();
+  source.onopen = () => {
+    if (source !== syncEventSource) return;
+    awaitSnapshots();
+    latestSyncStatus = null;
+    latestCleanupStatus = null;
+    syncStreamAvailable = true;
+  };
+  source.addEventListener("sync-status", event => {
+    if (source !== syncEventSource) return;
+    try {
+      receiveSyncStatus(JSON.parse(event.data));
+      receivedStatus = true;
+      receivedSnapshot();
+    } catch (_err) { source.onerror(); }
+  });
+  source.addEventListener("auto-update", event => {
+    if (source !== syncEventSource) return;
+    try {
+      renderAutoUpdateStatus(JSON.parse(event.data), !autoUpdateFormDirty, false);
+      receivedSchedule = true;
+      receivedSnapshot();
+    } catch (_err) { source.onerror(); }
+  });
+  source.addEventListener("cleanup-status", event => {
+    if (source !== syncEventSource) return;
+    try {
+      latestCleanupStatus = JSON.parse(event.data);
+      renderCleanupInventoryStatus(latestCleanupStatus);
+      receivedCleanup = true;
+      receivedSnapshot();
+      wakeSyncStatusWaiters();
+    } catch (_err) { source.onerror(); }
+  });
+  source.onerror = () => {
+    if (source !== syncEventSource) return;
+    syncStreamAvailable = false;
+    window.clearTimeout(syncConnectTimer);
+    wakeSyncStatusWaiters();
+    void pollLiveStatus();
+    void refreshAutoUpdateStatus();
+    void loadCleanupInventory();
+    // EventSource reconnects automatically; fresh snapshots restore the UI.
+  };
+}
 
 function renderStatusLogs(payload) {
   renderProgress(payload);
-  const output = document.getElementById("sync-output");
   const lines = [];
 
   if (payload.operation) {
@@ -331,39 +485,53 @@ function renderStatusLogs(payload) {
   }
 
   if (lines.length > 0) {
-    output.textContent = lines.join("\n");
+    setText("sync-output", lines.join("\n"));
   }
 }
 
 async function pollLiveStatus() {
-  if (statusPollBusy || document.hidden) return;
+  if (statusPollBusy || document.hidden || syncStreamAvailable) return;
   statusPollBusy = true;
   try {
     const payload = await fetchSyncStatus();
     if (!payload) return;
-    renderProgress(payload);
-    setButtonsDisabled(payload.active || localOperationRunning);
-    if (payload.operation) {
-      renderStatusLogs(payload);
-      if (!localOperationRunning) {
-        setStatus(payload.active ? "Filter operation running…" : (payload.success ? "Filter operation complete" : "Filter operation failed"),
-          payload.active ? "" : (payload.success ? "ok" : "bad"));
-      }
-    }
+    receiveSyncStatus(payload);
   } finally { statusPollBusy = false; }
 }
 
+function renderLiveStatus(payload) {
+  // Download and manifest preparation counts describe staged files, not the
+  // active manager. Only successful activation results can replace this metric.
+  if (payload.active === false && payload.success === true
+      && ["sync_apply", "auto_sync_apply", "sync_reload"].includes(payload.operation)) {
+    updateLoadedCount(payload.filter_count);
+  }
+  renderProgress(payload);
+  setButtonsDisabled(payload.active || localOperationRunning);
+  if (payload.operation) {
+    renderStatusLogs(payload);
+    if (!localOperationRunning) {
+      setStatus(payload.active ? "Filter operation running…" : (payload.success ? "Filter operation complete" : "Filter operation failed"),
+        payload.active ? "" : (payload.success ? "ok" : "bad"));
+    }
+  }
+}
+
 async function fetchSyncStatus() {
-  try {
-    const response = await fetch("/sync/status", { cache: "no-store" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
+  if (syncStreamAvailable) return latestSyncStatus;
+  if (syncStatusRequest) return syncStatusRequest;
+  syncStatusRequest = (async () => {
+    try {
+      const response = await fetch("/sync/status", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) return null;
+      // Ignore an older HTTP response if the SSE connection has recovered.
+      return syncStreamAvailable ? latestSyncStatus : payload;
+    } catch (_err) {
       return null;
     }
-    return payload;
-  } catch (_err) {
-    return null;
-  }
+  })();
+  try { return await syncStatusRequest; } finally { syncStatusRequest = null; }
 }
 
 function startLiveLogPolling() {
@@ -409,8 +577,20 @@ async function waitForOperationCompletion(expectedOperation) {
         return payload;
       }
     }
-    await sleep(1000);
+    await waitForStreamChange();
   }
+}
+
+function waitForStreamChange() {
+  return new Promise(resolve => {
+    const wake = () => {
+      window.clearTimeout(timer);
+      syncStatusWaiters.delete(wake);
+      resolve();
+    };
+    const timer = window.setTimeout(wake, 1000);
+    syncStatusWaiters.add(wake);
+  });
 }
 
 function scrollToProgress() {
@@ -454,7 +634,8 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     localOperationRunning = false;
     setButtonsDisabled(false);
     await pollLiveStatus();
-    await refreshCleanupInventory();
+    await loadCleanupInventory();
+    if (document.hidden && !cleanupRefreshRequestsScan) closeSyncEventStream();
   }
 }
 
@@ -478,6 +659,10 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
       return;
     }
 
+    // A fresh subscription guarantees its initial snapshot follows this accepted
+    // command, rather than reusing the cached completion of an earlier run.
+    closeSyncEventStream();
+    startSyncEventStream();
     const finalPayload = await waitForOperationCompletion(operation);
     if (finalPayload.success !== true) {
       setStatus(failure, "bad");
@@ -497,13 +682,19 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     localOperationRunning = false;
     setButtonsDisabled(false);
     await pollLiveStatus();
-    await refreshCleanupInventory();
+    await loadCleanupInventory();
+    if (document.hidden && !cleanupRefreshRequestsScan) closeSyncEventStream();
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  startSyncEventStream();
+  void loadSyncSettings();
+  document.getElementById("sync-settings-form").addEventListener("submit", saveSyncSettings);
+  document.getElementById("sync-settings-refresh").addEventListener("click", loadSyncSettings);
   void loadCleanupSettings();
-  void refreshCleanupInventory();
+  void loadCleanupInventory();
+  window.setInterval(() => { if (!document.hidden) void loadCleanupInventory(); }, 5000);
   document.getElementById("cleanup-delete").addEventListener("click", deleteSupersededFilters);
   document.getElementById("cleanup-files-refresh").addEventListener("click", () => { void refreshCleanupInventory(); });
   document.getElementById("cleanup-mode").addEventListener("change", syncCleanupDaysAvailability);
@@ -512,6 +703,13 @@ window.addEventListener("DOMContentLoaded", () => {
   startLiveLogPolling();
   refreshLoadedCount();
   void refreshAutoUpdateStatus();
+  window.setInterval(tickScheduleClock, 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && !localOperationRunning && !cleanupRefreshRequestsScan) closeSyncEventStream();
+    else if (!document.hidden) startSyncEventStream();
+  });
+  window.addEventListener("pagehide", closeSyncEventStream);
+  window.addEventListener("pageshow", startSyncEventStream);
 
   document.getElementById("auto-update-form").addEventListener("submit", saveAutoUpdateSchedule);
   document.getElementById("auto-update-enabled").addEventListener("change", () => {
@@ -524,7 +722,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("auto-update-refresh").addEventListener("click", () => {
     autoUpdateFormDirty = false;
     setAutoUpdateMessage("");
-    void refreshAutoUpdateStatus();
+    void refreshAutoUpdateStatus(true);
   });
   window.setInterval(() => {
     void refreshAutoUpdateStatus();
@@ -538,7 +736,7 @@ window.addEventListener("DOMContentLoaded", () => {
       success: "Filter sync, manifest update, and reload complete",
       failure: "Combined filter update failed",
       async onSuccess(payload) {
-        await refreshLoadedCount();
+        if (!updateLoadedCount(payload.filter_count)) await refreshLoadedCount();
       },
     });
   });
@@ -567,8 +765,8 @@ window.addEventListener("DOMContentLoaded", () => {
       inProgress: "Reloading filters...",
       success: "Reload complete",
       failure: "Reload failed",
-      async onSuccess(_payload) {
-        await refreshLoadedCount();
+      async onSuccess(payload) {
+        if (!updateLoadedCount(payload.filter_count)) await refreshLoadedCount();
       },
     });
   });
@@ -594,53 +792,119 @@ function showCleanupInventory(inventory) {
 }
 
 let cleanupRefreshPromise = null;
+let cleanupRefreshRequestsScan = false;
+let cleanupStatusSignature = null;
+let latestCleanupStatus = null;
 
-function refreshCleanupInventory() {
+function loadCleanupInventory() {
+  if (syncStreamAvailable) return Promise.resolve(cleanupInventory);
+  return refreshCleanupInventory(false);
+}
+
+function refreshCleanupInventory(requestScan = true) {
+  if (cleanupRefreshPromise && requestScan && !cleanupRefreshRequestsScan) {
+    // A cached status read cannot satisfy an explicit request for a new scan.
+    return cleanupRefreshPromise.then(() => refreshCleanupInventory(true));
+  }
   if (!cleanupRefreshPromise) {
-    cleanupRefreshPromise = runCleanupInventoryRefresh().finally(() => {
+    cleanupRefreshRequestsScan = requestScan;
+    cleanupRefreshPromise = runCleanupInventoryRefresh(requestScan).finally(() => {
       cleanupRefreshPromise = null;
+      cleanupRefreshRequestsScan = false;
     });
   }
   return cleanupRefreshPromise;
 }
 
-async function runCleanupInventoryRefresh() {
-  const message = document.getElementById("cleanup-files-message");
-  const refresh = document.getElementById("cleanup-files-refresh");
-  const deleteButton = document.getElementById("cleanup-delete");
-  refresh.disabled = true;
-  refresh.textContent = "Scanning…";
-  deleteButton.disabled = true;
-  message.textContent = "Scanning superseded filters in the background (waiting if a filter operation is running). Previous totals remain visible.";
-  message.className = "status";
+async function runCleanupInventoryRefresh(requestScan) {
+  if (requestScan) showCleanupScanning();
   try {
-    let response = await fetch("/sync/cleanup/files/refresh", { method: "POST" });
+    let response = await fetch(requestScan ? "/sync/cleanup/files/refresh" : "/sync/cleanup/files/status",
+      requestScan ? { method: "POST" } : { cache: "no-store" });
     let status = await readResponsePayload(response);
-    if (!response.ok) throw new Error(status.detail || "Could not start file totals scan");
-    while (status.active) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      response = await fetch("/sync/cleanup/files/status", { cache: "no-store" });
-      status = await readResponsePayload(response);
-      if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
+    if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
+    if (requestScan && syncStreamAvailable) {
+      // Initial snapshots from this subscription follow the accepted refresh,
+      // so an old cached completion cannot satisfy a newly requested scan.
+      closeSyncEventStream();
+      startSyncEventStream();
+    } else if (syncStreamAvailable) {
+      // An older fallback response must not overwrite a recovered stream.
+      if (!latestCleanupStatus) return cleanupInventory;
+      status = latestCleanupStatus;
     }
-    if (status.error) throw new Error(status.error);
-    if (!status.inventory) throw new Error("No file totals returned. Please refresh again.");
-    showCleanupInventory(status.inventory);
-    if (document.getElementById("cleanup-mode").disabled) void loadCleanupSettings();
-    message.textContent = "File totals refreshed.";
-    message.className = "status ok";
-    return status.inventory;
+    renderCleanupInventoryStatus(status, requestScan);
+    while (status.active) {
+      if (syncStreamAvailable) {
+        if (latestCleanupStatus && latestCleanupStatus !== status) status = latestCleanupStatus;
+        else {
+          await waitForStreamChange();
+          continue;
+        }
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Streaming may have recovered during the fallback delay.
+        if (syncStreamAvailable) continue;
+        response = await fetch("/sync/cleanup/files/status", { cache: "no-store" });
+        const fallbackStatus = await readResponsePayload(response);
+        if (!response.ok) throw new Error(fallbackStatus.detail || "Could not read file totals scan status");
+        if (syncStreamAvailable) {
+          if (!latestCleanupStatus) continue;
+          status = latestCleanupStatus;
+        } else status = fallbackStatus;
+      }
+      renderCleanupInventoryStatus(status, requestScan);
+    }
+    return cleanupInventory;
   } catch (error) {
-    cleanupInventory = null;
-    // Keep the previous numbers visible, but never permit deletion using a stale token.
-    message.textContent = `${error.message || String(error)} Previous totals may be out of date.`;
-    message.className = "status bad";
+    showCleanupError(error.message || String(error));
     return null;
   } finally {
-    refresh.disabled = cleanupDeleteRunning;
-    refresh.textContent = "Refresh file totals";
-    deleteButton.disabled = cleanupDeleteRunning || !cleanupInventory || cleanupInventory.filter_count === 0;
+    if (document.hidden && !localOperationRunning) closeSyncEventStream();
   }
+}
+
+function showCleanupScanning() {
+  document.getElementById("cleanup-files-refresh").disabled = true;
+  document.getElementById("cleanup-files-refresh").textContent = "Scanning…";
+  document.getElementById("cleanup-delete").disabled = true;
+  setText("cleanup-files-message", "Scanning superseded filters (waiting for any running filter operation). Previous totals remain visible.");
+  document.getElementById("cleanup-files-message").className = "status";
+}
+
+function showCleanupError(error) {
+  cleanupStatusSignature = null;
+  cleanupInventory = null;
+  // Keep previous totals visible, but never permit deletion using a stale token.
+  setText("cleanup-files-message", `${error} Previous totals may be out of date.`);
+  document.getElementById("cleanup-files-message").className = "status bad";
+  document.getElementById("cleanup-files-refresh").disabled = cleanupDeleteRunning;
+  document.getElementById("cleanup-files-refresh").textContent = "Refresh file totals";
+  document.getElementById("cleanup-delete").disabled = true;
+}
+
+function renderCleanupInventoryStatus(status, requestScan = false) {
+  const signature = JSON.stringify(status);
+  if (!requestScan && signature === cleanupStatusSignature) return;
+  cleanupStatusSignature = signature;
+  if (status.inventory) showCleanupInventory(status.inventory);
+  setText("cleanup-checked-at", status.checked_at ? formatHistoryTime(status.checked_at) : "Never checked");
+  if (status.active) {
+    showCleanupScanning();
+    return;
+  }
+  if (status.error) {
+    showCleanupError(status.error);
+    return;
+  }
+  if (!status.inventory) cleanupInventory = null;
+  document.getElementById("cleanup-files-refresh").disabled = cleanupDeleteRunning;
+  document.getElementById("cleanup-files-refresh").textContent = "Refresh file totals";
+  document.getElementById("cleanup-delete").disabled = cleanupDeleteRunning || !cleanupInventory || cleanupInventory.filter_count === 0;
+  if (document.getElementById("cleanup-mode").disabled) void loadCleanupSettings();
+  setText("cleanup-files-message", !status.inventory ? "No cached totals. Use Refresh file totals to check."
+    : (requestScan ? "File totals refreshed." : "Showing the last checked file totals."));
+  document.getElementById("cleanup-files-message").className = status.inventory ? "status ok" : "status";
 }
 
 async function deleteSupersededFilters() {
@@ -665,7 +929,7 @@ async function deleteSupersededFilters() {
     });
     const result = await readResponsePayload(response);
     if (!response.ok) throw new Error(result.detail || "Could not delete superseded filters");
-    showCleanupInventory(result);
+    await loadCleanupInventory();
     message.textContent = `Deleted ${result.deleted_count.toLocaleString()} superseded filters (${formatFilterBytes(result.deleted_bytes)}).`
       + (result.filter_count ? ` ${result.filter_count.toLocaleString()} remain; check diagnostic logs and retry.` : "");
     message.className = result.filter_count ? "status bad" : "status ok";
@@ -684,6 +948,51 @@ function syncCleanupDaysAvailability() {
   const retained = document.getElementById("cleanup-mode").value === "retained";
   document.getElementById("cleanup-days").disabled = !retained;
   document.getElementById("cleanup-days-field").hidden = !retained;
+}
+
+function showSyncSettings(settings) {
+  document.getElementById("reuse-verified-md5").checked = settings.reuse_verified_md5 === true;
+  document.getElementById("reuse-verified-md5").disabled = false;
+  document.getElementById("sync-settings-save").disabled = false;
+}
+
+async function loadSyncSettings() {
+  const message = document.getElementById("sync-settings-message");
+  try {
+    const response = await fetch("/sync/settings", { cache: "no-store" });
+    const settings = await readResponsePayload(response);
+    if (!response.ok) throw new Error(settings.detail || "Could not load verification setting");
+    showSyncSettings(settings);
+    message.textContent = "";
+    message.className = "status";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  }
+}
+
+async function saveSyncSettings(event) {
+  event.preventDefault();
+  const button = document.getElementById("sync-settings-save");
+  const message = document.getElementById("sync-settings-message");
+  button.disabled = true;
+  try {
+    const response = await fetch("/sync/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reuse_verified_md5: document.getElementById("reuse-verified-md5").checked }),
+    });
+    const settings = await readResponsePayload(response);
+    if (!response.ok) throw new Error(settings.detail || "Could not save verification setting");
+    showSyncSettings(settings);
+    message.textContent = "Verification setting saved. Applies to the next sync and survives restarts.";
+    message.className = "status ok";
+  } catch (error) {
+    message.textContent = error.message || String(error);
+    message.className = "status bad";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function showCleanupSettings(settings) {
@@ -751,7 +1060,7 @@ function renderProgress(payload) {
   summary.textContent = payload.active ? 'Operation in progress' : (payload.success === true ? 'Operation complete' : (payload.success === false ? 'Operation failed' : 'No operation started yet.'));
   const container = document.getElementById('sync-progress');
   container.replaceChildren();
-  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Extract filters', verify: 'Verify checksums', manifest: 'Update local manifest', reload: 'Reload filters' };
+  const labels = { prepare: 'Fetch remote manifest', download: 'Check and download archives', extract: 'Stage incoming filters', verify: 'Verify checksums', manifest: 'Prepare candidate manifest', validate: 'Validate all shards and required test credentials', reload: 'Activate validated filters' };
   const statuses = { pending: 'Waiting', running: 'In progress', complete: 'Complete', failed: 'Failed', skipped: 'Not needed' };
   payload.progress.forEach(phase => {
     const row = document.createElement('div');

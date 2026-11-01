@@ -11,6 +11,7 @@
 
 .sync-actions-panel__inner {
   height: 100%;
+  align-content: start;
 }
 
 .sync-action-block {
@@ -40,6 +41,63 @@
   color: var(--text-primary);
   font-size: 1rem;
   font-weight: 600;
+}
+
+.sync-disclosure__summary {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  list-style: none;
+  cursor: pointer;
+}
+
+.sync-disclosure__summary::-webkit-details-marker {
+  display: none;
+}
+
+.sync-disclosure__summary .sync-section-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.sync-disclosure__summary::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  color: var(--text-soft);
+  transform: rotate(45deg);
+}
+
+.sync-disclosure[open] > .sync-disclosure__summary::after {
+  transform: rotate(225deg);
+}
+
+.sync-disclosure__summary:hover .sync-section-heading {
+  color: var(--color-primary-300);
+}
+
+.sync-disclosure__summary:focus-visible {
+  outline: 2px solid var(--color-primary-300);
+  outline-offset: -2px;
+  border-radius: 0.5rem;
+}
+
+.sync-disclosure__summary .section-eyebrow {
+  display: block;
+  margin-bottom: 0.4rem;
+}
+
+.sync-disclosure__content {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+}
+
+.sync-disclosure > .auto-update-card__inner {
+  padding-top: 0;
 }
 
 #sync-status {
@@ -118,8 +176,7 @@
 
 .auto-update-form {
   display: grid;
-  grid-template-columns: minmax(16rem, 1.2fr) minmax(12rem, 0.8fr) minmax(13rem, 0.7fr);
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   padding: 1rem;
   border: 1px solid var(--border-soft);
@@ -127,11 +184,24 @@
   background: rgba(255, 255, 255, 0.03);
 }
 
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 1rem;
+}
+
+.settings-fields > .field-stack {
+  min-width: 0;
+}
+
 .toggle-field {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-  min-height: 3.5rem;
+  position: relative;
+  display: grid;
+  justify-items: start;
+  align-content: start;
+  gap: 0.45rem;
+  min-width: 0;
   cursor: pointer;
 }
 
@@ -146,6 +216,7 @@
   position: relative;
   width: 3.2rem;
   height: 1.75rem;
+  margin-block: 0.875rem;
   flex: 0 0 auto;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-pill);
@@ -180,21 +251,6 @@
   outline-offset: 3px;
 }
 
-.toggle-field > span:last-child {
-  display: grid;
-  gap: 0.15rem;
-}
-
-.toggle-field strong {
-  color: var(--text-primary);
-  font-size: 0.92rem;
-}
-
-.toggle-field small {
-  color: var(--text-soft);
-  font-size: 0.8rem;
-}
-
 .schedule-hour-input {
   max-width: 11rem;
 }
@@ -205,18 +261,24 @@
 }
 
 .schedule-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: 0.7rem;
   min-width: 0;
 }
 
 .schedule-actions .action-button {
+  width: auto;
+  max-width: 100%;
   min-width: 0;
-  padding-inline: 0.75rem;
+  padding-inline: 1.25rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 #auto-update-message,
+#sync-settings-message,
 #cleanup-message {
   grid-column: 1 / -1;
   margin: 0;
@@ -226,7 +288,7 @@
   display: none;
 }
 
-#cleanup-message:empty,
+.auto-update-form > .status:empty,
 #cleanup-files-message:empty {
   display: none;
 }
@@ -330,8 +392,7 @@
 }
 
 #sync-output {
-  min-height: 16rem;
-  max-height: 32rem;
+  height: clamp(16rem, 50vh, 32rem);
   overflow: auto;
 }
 
@@ -340,25 +401,14 @@
     grid-template-columns: 1fr;
   }
 
-  .auto-update-form {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .toggle-field {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-width: 820px) {
   .sync-actions-grid,
   .sync-metrics-grid,
-  .auto-update-form,
+  .settings-fields,
   .schedule-facts {
     grid-template-columns: 1fr;
-  }
-
-  .toggle-field {
-    grid-column: auto;
   }
 
   .schedule-hour-input {
@@ -367,6 +417,12 @@
 
   .auto-update-heading {
     align-items: flex-start;
+  }
+}
+
+@media (max-width: 480px) {
+  .schedule-actions .action-button {
+    width: 100%;
   }
 }
 

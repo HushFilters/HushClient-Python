@@ -4,4 +4,4 @@
 .log-options input { width: 18px; height: 18px; }
 fieldset { border: 1px solid #64748b; border-radius: 10px; margin: 20px 0; }
 .log-actions { display: flex; flex-wrap: wrap; gap: 12px; }
-#log-output { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#log-output { height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -1,8 +1,9 @@
 """Discover superseded date ranges and persist their retention policy."""
 from __future__ import annotations
 
-import json
+import errno
 import hashlib
+import json
 import logging
 import math
 import os
@@ -154,7 +155,7 @@ class FilterCleanup:
     @staticmethod
     @lru_cache(maxsize=512)
     def _build_range(directory: str):
-        match = re.fullmatch(r"(\d{6})/(\d{8})_(\d{8})", directory)
+        match = re.fullmatch(r"(?:\.generations/[0-9a-f]{32}/)?(\d{6})/(\d{8})_(\d{8})", directory)
         if not match:
             return None
         month, start, end = match.groups()
@@ -179,6 +180,21 @@ class FilterCleanup:
 
     def scan(self):
         return _FileScan(self.root)
+
+    @classmethod
+    def build_directories(cls, scan):
+        roots = [""]
+        roots.extend(f".generations/{generation}" for generation in scan.entries(".generations")
+                     if re.fullmatch(r"[0-9a-f]{32}", generation))
+        for prefix in roots:
+            for month in scan.entries(prefix):
+                if not re.fullmatch(r"\d{6}", month):
+                    continue
+                month_dir = f"{prefix}/{month}" if prefix else month
+                for build in scan.entries(month_dir):
+                    directory = f"{month_dir}/{build}"
+                    if cls._build_range(directory) is not None and scan.directory(directory):
+                        yield directory
 
     @staticmethod
     def _covers(ranges, start, end):
@@ -210,23 +226,16 @@ class FilterCleanup:
         if not coverage:
             return set()
         superseded = set()
-        for month in scan.entries(""):
-            if not re.fullmatch(r"\d{6}", month):
+        for directory in self.build_directories(scan):
+            covered_shards = {shard for shard, ranges in coverage.items()
+                              if self._covers(ranges, *self._build_range(directory))}
+            if not covered_shards:
                 continue
-            for build in scan.entries(month):
-                directory = f"{month}/{build}"
-                dates = self._build_range(directory)
-                if dates is None:
-                    continue
-                covered_shards = {shard for shard, ranges in coverage.items()
-                                  if self._covers(ranges, *dates)}
-                if not covered_shards:
-                    continue  # Do not enumerate files in a build with no replacement coverage.
-                for filename in scan.entries(directory):
-                    name = f"{directory}/{filename}"
-                    if (name not in active and filename[:2] in covered_shards
-                            and self._range(name) is not None and scan.has_file(name)):
-                        superseded.add(name)
+            for filename in scan.entries(directory):
+                name = f"{directory}/{filename}"
+                if (name not in active and filename[:2] in covered_shards
+                        and self._range(name) is not None and scan.has_file(name)):
+                    superseded.add(name)
         return superseded
 
     def loaded(self, paths, *, now: float | None = None, scan=None) -> None:
@@ -268,6 +277,26 @@ class FilterCleanup:
             "confirmation_token": hashlib.sha256(json.dumps(files).encode()).hexdigest(),
         }
 
+    def _remove_empty_build_directories(self, protected: set[str]) -> None:
+        protected_directories = {name.rpartition("/")[0] for name in protected}
+        for directory in self.build_directories(self.scan()):
+            if directory in protected_directories:
+                continue
+            path = self.root / directory
+            try:
+                # Recheck containment and linked ancestors immediately before removal.
+                if not path.resolve().is_relative_to(self.root) or not self.scan().directory(directory):
+                    continue
+                # Never recursively delete: files or subdirectories keep a build intact.
+                path.rmdir()
+                logger.info("Removed empty filter build directory %s", path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    logger.warning("Could not remove empty filter build directory %s; will retry", path,
+                                   exc_info=True)
+
     def cleanup(self, protected_paths, *, now: float | None = None, manual: bool = False) -> list[str]:
         if not manual and not self.settings.enabled:
             return []
@@ -295,4 +324,5 @@ class FilterCleanup:
                 logger.exception("Could not delete superseded filter %s; will retry", name)
         if retired != self.retired:
             self._save(self.settings, self.active, retired)
+        self._remove_empty_build_directories(protected)
         return deleted

@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HushFilter Sync UI</title>
-  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20260922b">
-  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261029b">
+  <link rel="stylesheet" href="/ui-assets/nwebbed-ui.css?v=20261101c">
+  <link rel="stylesheet" href="/ui-sync/styles.css?v=20261101g">
 </head>
-<body>
+<body class="operational-page">
   <main class="workspace-shell">
     <section class="workspace-panel">
       {{TEST_MODE_BANNER}}
@@ -49,51 +49,76 @@
               <section class="sync-action-block sync-action-block--primary">
                 <p class="section-eyebrow">Primary Action</p>
                 <h2 class="sync-section-heading">Apply Latest Filters</h2>
-                <p class="section-copy">Run filter sync, update <code>manifest.json</code>, and reload the application with the new filters in one sequential operation.</p>
+                <p class="section-copy">Stage and verify replacement filters, validate all 256 shards and the required test credentials in every group, then safely activate the new filters. New builds check one credential per shard; legacy builds check the original four. Existing requests finish using their original filters.</p>
                 <button id="apply-button" class="action-button" type="button">sync, update manifest, and reload filters</button>
               </section>
 
               <section class="sync-action-block">
-                <p class="section-eyebrow">Manual Steps</p>
-                <h2 class="sync-section-heading">Manual Steps</h2>
-                <p class="section-copy">Run the filter sync workflow one step at a time when you want to inspect or repeat a specific stage.</p>
-                <div class="sync-actions-grid">
-                  <button id="sync-button" class="action-button action-button--secondary" type="button">sync filters from nWebbed</button>
-                  <button id="manifest-button" class="action-button action-button--amber" type="button">update manifest</button>
-                  <button id="reload-button" class="action-button action-button--cyan" type="button">reload with new filters</button>
-                </div>
+                <details class="sync-disclosure">
+                  <summary class="sync-disclosure__summary">
+                    <h2 class="sync-section-heading">Manual Steps</h2>
+                  </summary>
+                  <div class="sync-disclosure__content">
+                    <p class="section-copy">Run the workflow one step at a time. Sync and manifest preparation leave the active filters in place; reload validates the candidate before activating it.</p>
+                    <div class="sync-actions-grid">
+                      <button id="sync-button" class="action-button action-button--secondary" type="button">sync filters from nWebbed</button>
+                      <button id="manifest-button" class="action-button action-button--amber" type="button">update manifest</button>
+                      <button id="reload-button" class="action-button action-button--cyan" type="button">reload with new filters</button>
+                    </div>
+                  </div>
+                </details>
                 <p id="sync-status" class="status">Idle</p>
               </section>
             </div>
           </section>
         </div>
 
-        <section class="surface-card auto-update-card">
+        <details class="surface-card auto-update-card sync-disclosure">
+          <summary class="surface-card__inner sync-disclosure__summary">
+            <h2 class="sync-section-heading"><span class="section-eyebrow">Verification</span>Filter MD5 Verification</h2>
+          </summary>
           <div class="surface-card__inner auto-update-card__inner">
-            <div class="auto-update-heading">
-              <div>
-                <p class="section-eyebrow">Automation</p>
-                <h2 class="sync-section-heading">Daily Auto-Update</h2>
-                <p class="section-copy">Control the server-side schedule and review recent manual and automatic sync outcomes.</p>
+            <p class="section-copy">By default, every sync rehashes existing filters. Newly downloaded filters are always hashed and verified.</p>
+            <form id="sync-settings-form" class="auto-update-form">
+              <label class="toggle-field" for="reuse-verified-md5">
+                <span class="field-label">Reuse verified MD5 results</span>
+                <input id="reuse-verified-md5" type="checkbox" disabled>
+                <span class="toggle-control" aria-hidden="true"></span>
+                <small class="field-help">Skip rehashing only when the remote MD5, local file identity, size, and timestamps match a saved verification. Missing records or changed metadata force a rehash. Disabled by default.</small>
+              </label>
+              <p class="section-copy">Applies to manual and scheduled syncs. Reusing a saved result does not detect corruption that leaves file metadata unchanged.</p>
+              <div class="schedule-actions">
+                <button id="sync-settings-save" class="action-button" type="submit" disabled>Save verification setting</button>
+                <button id="sync-settings-refresh" class="action-button action-button--secondary" type="button">Refresh</button>
               </div>
-              <span id="auto-update-badge" class="schedule-badge">Loading</span>
-            </div>
+              <p id="sync-settings-message" class="status" aria-live="polite"></p>
+            </form>
+          </div>
+        </details>
+
+        <details class="surface-card auto-update-card sync-disclosure">
+          <summary class="surface-card__inner sync-disclosure__summary">
+            <h2 class="sync-section-heading"><span class="section-eyebrow">Automation</span>Daily Auto-Update</h2>
+            <span id="auto-update-badge" class="schedule-badge">Loading</span>
+          </summary>
+          <div class="surface-card__inner auto-update-card__inner">
+            <p class="section-copy">Control the server-side schedule and review recent manual and automatic sync outcomes.</p>
 
             <form id="auto-update-form" class="auto-update-form">
-              <label class="toggle-field" for="auto-update-enabled">
-                <input id="auto-update-enabled" type="checkbox">
-                <span class="toggle-control" aria-hidden="true"></span>
-                <span>
-                  <strong>Enable daily updates</strong>
-                  <small>The schedule takes effect immediately and survives container restarts.</small>
-                </span>
-              </label>
+              <div class="settings-fields">
+                <label class="toggle-field" for="auto-update-enabled">
+                  <span class="field-label">Enable daily updates</span>
+                  <input id="auto-update-enabled" type="checkbox">
+                  <span class="toggle-control" aria-hidden="true"></span>
+                  <small class="field-help">The schedule takes effect immediately and survives container restarts.</small>
+                </label>
 
-              <label class="field-stack" for="auto-update-hour">
-                <span class="field-label">Container-local start hour</span>
-                <input id="auto-update-hour" class="app-input schedule-hour-input" type="number" min="0" max="23" step="1" required>
-                <span class="field-help">Use 24-hour time. For example, 2 means 02:00 and 14 means 14:00.</span>
-              </label>
+                <label class="field-stack" for="auto-update-hour">
+                  <span class="field-label">Container-local start hour</span>
+                  <input id="auto-update-hour" class="app-input schedule-hour-input" type="number" min="0" max="23" step="1" required>
+                  <span class="field-help">Use 24-hour time. For example, 2 means 02:00 and 14 means 14:00.</span>
+                </label>
+              </div>
 
               <div class="schedule-actions">
                 <button id="auto-update-save" class="action-button" type="submit">Save schedule</button>
@@ -120,29 +145,30 @@
             </dl>
 
           </div>
-        </section>
+        </details>
 
-        <section class="surface-card auto-update-card">
+        <details class="surface-card auto-update-card sync-disclosure">
+          <summary class="surface-card__inner sync-disclosure__summary">
+            <h2 class="sync-section-heading"><span class="section-eyebrow">Storage</span>Superseded Filter Cleanup</h2>
+          </summary>
           <div class="surface-card__inner auto-update-card__inner">
-            <div>
-              <p class="section-eyebrow">Storage</p>
-              <h2 class="sync-section-heading">Superseded Filter Cleanup</h2>
-              <p class="section-copy">Choose when to delete old filter files after their replacements have successfully loaded. Retention starts when a filter is superseded, not when it was downloaded.</p>
-            </div>
+            <p class="section-copy">Choose when to delete old filter files after their replacements have successfully loaded. Retention starts when a filter is superseded, not when it was downloaded.</p>
             <form id="cleanup-form" class="auto-update-form">
-              <label class="field-stack" for="cleanup-mode">
-                <span class="field-label">Automatic deletion</span>
-                <select id="cleanup-mode" class="app-input" disabled>
-                  <option value="retained" selected>Keep for a number of days</option>
-                  <option value="immediate">Immediately after loading</option>
-                  <option value="off">Off — delete manually</option>
-                </select>
-              </label>
-              <label id="cleanup-days-field" class="field-stack" for="cleanup-days">
-                <span class="field-label">Days to keep superseded filters</span>
-                <input id="cleanup-days" class="app-input schedule-hour-input" type="number" min="1" max="31" step="1" value="31" required disabled>
-                <span class="field-help">1–31 days. Default: 31 days.</span>
-              </label>
+              <div class="settings-fields">
+                <label class="field-stack" for="cleanup-mode">
+                  <span class="field-label">Automatic deletion</span>
+                  <select id="cleanup-mode" class="app-input" disabled>
+                    <option value="retained" selected>Keep for a number of days</option>
+                    <option value="immediate">Immediately after loading</option>
+                    <option value="off">Off — delete manually</option>
+                  </select>
+                </label>
+                <label id="cleanup-days-field" class="field-stack" for="cleanup-days">
+                  <span class="field-label">Days to keep superseded filters</span>
+                  <input id="cleanup-days" class="app-input schedule-hour-input" type="number" min="1" max="31" step="1" value="31" required disabled>
+                  <span class="field-help">1–31 days. Default: 31 days.</span>
+                </label>
+              </div>
               <div class="schedule-actions">
                 <button id="cleanup-save" class="action-button" type="submit" disabled>Save cleanup settings</button>
                 <button id="cleanup-refresh" class="action-button action-button--secondary" type="button">Refresh</button>
@@ -153,6 +179,7 @@
             <dl class="schedule-facts">
               <div><dt>Superseded filters</dt><dd id="cleanup-count">—</dd></div>
               <div><dt>Total file size</dt><dd id="cleanup-size">—</dd></div>
+              <div><dt>Last checked at</dt><dd id="cleanup-checked-at">Never checked</dd></div>
             </dl>
             <p class="section-copy">Delete superseded filters now, even if automatic deletion is off or their retention period has not ended. Active filters, files awaiting reload, and date ranges without full replacement coverage are protected. This cannot be undone.</p>
             <div class="schedule-actions">
@@ -161,7 +188,7 @@
             </div>
             <p id="cleanup-files-message" class="status" aria-live="polite"></p>
           </div>
-        </section>
+        </details>
 
         <section class="metrics-grid sync-metrics-grid">
           <article id="sync-progress-section" class="surface-card progress-card">
@@ -202,7 +229,7 @@
     </section>
   </main>
 
-  <script src="/ui-assets/log-window.js?v=20260920b" defer></script>
-  <script src="/ui-sync/app.js?v=20261031a" defer></script>
+  <script src="/ui-assets/log-window.js?v=20261101b" defer></script>
+  <script src="/ui-sync/app.js?v=20261101f" defer></script>
 </body>
 </html>

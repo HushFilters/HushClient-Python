@@ -141,21 +141,43 @@ The [Filter Sync UI](https://localhost/ui-sync/) can enable or disable automatic
 
 UI changes are saved in `filters/.auto_update_state.json` and take precedence over environment defaults on later starts. The Docker filters volume preserves this state when the API container is recreated. Delete that state file to return to the `AUTO_UPDATE_FILTERS` and `AUTO_UPDATE_TIME` defaults.
 
+### Validated filter activation
+
+The full sync/apply workflow downloads changed groups into a unique `filters/.generations/<id>/` directory. Existing active groups whose files match the incoming manifest checksums are reused directly. Downloads never overwrite files mapped by the active service. Keep enough free disk space for the incoming groups alongside the current filters; a replacement of the same date range also uses a separate generation.
+
+Every sync rehashes existing filters by default. To reduce repeated CPU work and full-file reads, enable **Reuse verified MD5 results** under **Filter MD5 Verification** on the Sync page. This setting applies to manual and scheduled syncs and persists in `filters/.sync_settings.json` (override with `HUSHCLIENT_SYNC_SETTINGS_PATH`). `GET /sync/settings` reads it; `PUT /sync/settings` accepts `{"reuse_verified_md5": true}` to enable it or `false` to restore full hashing. Settings cannot be changed during a filter operation.
+
+New downloads are always fully hashed and checked against the remote MD5s. Successful syncs save local verification records in `filters/.verified_md5.json`. When reuse is enabled, a saved result is accepted only if the incoming remote MD5, resolved local path, filesystem device/file ID, size, modification timestamp, and platform-specific ctime timestamp still match. Missing, unreadable, incomplete, or older records force hashing; filesystems without a usable file ID also force hashing. Changed metadata triggers a rehash even when the contents still match. Once local verification begins, failed or interrupted syncs discard cached verification so the next attempt rehashes. These files live in the existing Docker filters volume.
+
+Checksum reuse trades repeated content verification for metadata checks: corruption that leaves metadata unchanged may go undetected. Disabling reuse rehashes on the next sync. Standalone `python -m filter_sync` uses the saved setting too; `--reuse-verified-md5` or `--no-reuse-verified-md5` overrides it for one invocation. Standalone reload verification continues to hash the files; reloads of a staged sync candidate use its verification records and check file metadata before activation.
+
+Before activation, every selected group must contain exactly one shard for each prefix `00`–`ff`, and all selected files must pass checksum verification and load successfully. Each group must also pass its manifest-declared test credentials in their expected individual shards. The `shard-canaries-v1` suite has exactly 256 credentials, one per shard, including the original four published pairs. Every individual shard in such a group is tested. Legacy groups retain the original four checks. Checks do not stop when another group matches. The Progress panel shows a validation phase and the operational log records each group's test-set ID and pass count. These are Bloom filter smoke tests; checksum verification remains necessary for all files. Older retained groups receive diagnostic checks for the original four credentials; a failure in an obsolete group is logged without blocking a healthy replacement.
+
+The remote `manifest_current.json` includes the complete public test credential lists inline under `test_sets`. Each set has an `id` and a `credentials` array with `username`, `password`, `sha256`, and two-character `shard` fields. `current_filter_tests` maps exact build locations such as `202601/20010101_20260101` to a test-set ID. This allows a rebuilt historic range to use 256 checks while untouched ranges still use four. The client recomputes the hashes and shards, requires complete shard coverage for `shard-canaries-v1`, and rejects unknown, incomplete, or inconsistent declarations. Only manifests without both metadata fields use the legacy default; empty or malformed declarations cannot disable checks. Per-range metadata is preserved in staged and active manifests and by the local manifest-generation helper, so reloads use the same test selection. New suites take effect after the replacement filters and updated manifest are published and the client successfully syncs/applies them.
+
+A complete candidate manager is loaded once and reused for activation. The client atomically publishes `filters/.active_manifest.json`, switches new requests to that manager, then waits for lookups and batches using the previous manager to finish before closing its mappings and running superseded-file cleanup. Any pre-activation failure closes candidate mappings and leaves the active manager, active manifest, and cleanup state unchanged. If the process stops after publication, the next startup reads the validated generation from the active manifest. All of this state lives in the existing filters directory volume; the original bind-mounted `manifest.json` is kept as the initial/bootstrap configuration. Run one API process for a given filters directory (the supplied container default); activation locks and reader leases are process-local.
+
+Manual stages follow the same rules: `POST /sync/filters` stages checksum-verified files and saves `filters/.pending_manifest.json`; `POST /sync/manifest` prepares/checks that candidate without changing the active set; `POST /sync/reload` validates it and activates only on success. Pending candidates survive restarts and remain protected from manual cleanup. Failed or interrupted generation directories may remain for diagnosis and consume disk space; never delete a generation referenced by the active or pending manifest. Once superseded, dated generation files follow the same retention policy as legacy dated files.
+
+`MANIFEST_PATH` supplies the bootstrap manifest until an activation exists. Test mode continues to use its configured test manifest and never publishes a durable production activation. The credential-check CLI also follows the validated active manifest by default; an explicit `-m` path still selects that file. `HUSHCLIENT_ACTIVE_MANIFEST_PATH` and `HUSHCLIENT_PENDING_MANIFEST_PATH` can override the activation state paths; keep these inside a directory volume so atomic replacement works. The standalone download CLI is a separate download-only workflow: do not run it against a serving client's filter directory, because it does not participate in the service's activation lock or reader lifecycle.
+
 ### Superseded filter cleanup
 
-The cleanup panel shows the count and combined file size of superseded filters currently eligible for manual deletion, including dated files already on disk before cleanup was enabled. Totals refresh when the page opens, after sync operations complete, and on demand; there is no periodic cleanup scan. **Delete superseded filters** fetches current totals and asks “Are you sure?” before permanently deleting them, regardless of the automatic cleanup setting or remaining retention time. Active filters, pending reload files, changed files, and ranges without full replacement coverage are excluded. If the confirmed set changes, refresh and confirm again. The result reports the number and size deleted, plus any files remaining after deletion failures.
+Cleanup also removes empty dated build folders, including leftovers from earlier runs, while preserving folders referenced by active or pending filters. It leaves nonempty folders and their parent month/generation directories intact. Empty folders do not count toward superseded file totals and are skipped by retained-group diagnostics; partially populated groups still produce warnings.
 
-The UI starts or joins a background scan using `POST /sync/cleanup/files/refresh` (HTTP 202), then polls `GET /sync/cleanup/files/status` only while it is active. Status reads return cached data without scanning the filesystem. Previous totals remain visible, and duplicate refreshes share one scan. Scans wait for any current filter operation to finish.
+The cleanup panel shows the count and combined file size of superseded filters currently eligible for manual deletion, including dated files already on disk before cleanup was enabled. The page reuses the service’s cached totals and shows **Last checked at** in your local time; opening or revisiting the page does not scan the filesystem. The service scans at startup, after manual or scheduled sync, manifest update, reload, or deletion finishes, and on demand. The cache lasts until the service restarts; there is no periodic cleanup scan. **Delete superseded filters** fetches current totals and asks “Are you sure?” before permanently deleting them, regardless of the automatic cleanup setting or remaining retention time. Active filters, pending reload files, changed files, and ranges without full replacement coverage are excluded. If the confirmed set changes, refresh and confirm again. The result reports the number and size deleted, plus any files remaining after deletion failures.
+
+The UI receives cached file totals and scan state through `cleanup-status` events on its shared `GET /sync/events` SSE connection. **Refresh file totals** starts or joins a background scan using `POST /sync/cleanup/files/refresh` (HTTP 202), then receives completion through SSE. `GET /sync/cleanup/files/status` remains available for API clients and as a UI polling fallback when SSE is unavailable. Status returns `active`, `inventory`, `error`, and `checked_at` (the last successful scan time) without scanning the filesystem. Previous totals and the last successful check time remain visible while scanning or if a scan fails. Duplicate refreshes share one scan; an operation completing during an existing scan requests a follow-up scan. Scans, deletion, and manual or scheduled filter operations share a lock and wait for one another without blocking status or credential-check requests.
 
 Discovery compares coverage by build folder before enumerating candidate files. Folders without replacement coverage are skipped. Within one scan, directory safety checks, listings, and file metadata are shared between discovery and totals calculation; candidate sizes are read once from metadata, without reading filter contents. This snapshot is discarded after the scan. Deletion always performs fresh path and file-identity checks.
 
-The synchronous API `GET /sync/cleanup/files` remains available and returns `filter_count`, `total_bytes`, and a `confirmation_token` for the current set. After confirmation, `POST /sync/cleanup/delete` accepts `{"confirmation_token": "<token>"}`. A stale token or concurrent filter operation returns HTTP 409; no files are deleted in those cases. Manual deletion requires a complete, nonempty loaded filter set.
+The synchronous API `GET /sync/cleanup/files` remains available and returns `filter_count`, `total_bytes`, and a `confirmation_token` for the current set. After confirmation, `POST /sync/cleanup/delete` accepts `{"confirmation_token": "<token>"}`. Deletion waits for any running filter operation and revalidates the confirmed set after acquiring the lock. A stale token returns HTTP 409 without deleting files. The legacy synchronous inventory endpoint still returns HTTP 409 if the lock is busy. Manual deletion requires a complete, nonempty loaded filter set.
 
 On **Filter Synchronization**, use **Superseded Filter Cleanup** to choose immediate deletion after replacement filters successfully load, retention for **1–31 days**, or **Off** for manual deletion. The default is **31 days**. Retention starts when the old filter is superseded; repeated syncs do not extend it.
 
-Cleanup discovers dated `.hf` files inside `filters/YYYYMM/YYYYMMDD_YYYYMMDD/`, with filenames `hh_YYYYMMDD_YYYYMMDD.hf`. A file is superseded only when successfully loaded filters for the same hash shard cover its entire date range. For example, `20260101_20261001` replaces earlier 2026 year-to-date, weekly, and daily ranges ending on or before October 1, but not the historic range ending January 1. Adjacent loaded ranges may jointly cover an older range; gaps or a missing shard prevent retirement. Previously tracked dated files are re-evaluated against current coverage. Custom undated filters retain previous-load tracking; unfamiliar untracked files are left alone.
+Cleanup discovers dated `.hf` files inside `filters/YYYYMM/YYYYMMDD_YYYYMMDD/` and `filters/.generations/<id>/YYYYMM/YYYYMMDD_YYYYMMDD/`, with filenames `hh_YYYYMMDD_YYYYMMDD.hf`. A file is superseded only when successfully loaded filters for the same hash shard cover its entire date range. For example, `20260101_20261001` replaces earlier 2026 year-to-date, weekly, and daily ranges ending on or before October 1, but not the historic range ending January 1. Adjacent loaded ranges may jointly cover an older range; gaps or a missing shard prevent retirement. Previously tracked dated files are re-evaluated against current coverage. Custom undated filters retain previous-load tracking; unfamiliar untracked files are left alone.
 
-For existing superseded files with no recorded retirement time, retention starts when coverage is first detected after a complete load, not at the date encoded in the filename or the file modification time. Active files, files selected for a pending reload, and files changed since retirement are protected. Failed or incomplete reloads keep the previous filters active and do not retire them. The downloaded manifest is published only after sync verification completes, and manifest generation fails if a listed filter is missing.
+For existing superseded files with no recorded retirement time, retention starts when coverage is first detected after a complete load, not at the date encoded in the filename or the file modification time. Active files, files selected for a pending reload, and files changed since retirement are protected. Failed or incomplete reloads keep the previous filters active and do not retire them. The active manifest is published only after checksum, completeness, loading, and all four per-group credential checks pass. Candidate preparation fails if a listed filter is missing.
 
 Automatic cleanup runs at the end of a successful sync/apply sequence, after all replacement filters have loaded, and after a successful standalone manual reload. There is no background cleanup timer. Startup records loaded filters and discovers superseded files in a background job without deleting them or delaying API health/readiness. Expired files and failed deletions wait for the next successful sync/reload or a confirmed manual deletion; retention is therefore a minimum age, not an exact deletion deadline. Disabling cleanup preserves retirement timestamps; re-enabling it or shortening retention takes effect at the next successful sync/reload. Cleanup is disabled in test mode. The standalone download CLI does not delete superseded filters because it does not load their replacements.
 
@@ -204,13 +226,13 @@ Content-Type: application/json
 ### CLI
 ```bash
 # Manifest-backed credential check
-uv run hush.py -m manifest.json -u USERNAME -p PASSWORD
+uv run hush.py -u USERNAME -p PASSWORD
 
 # Manifest-backed batch credentials from TSV
-uv run hush.py -m manifest.json -t credentials.tsv
+uv run hush.py -t credentials.tsv
 
 # Manifest-backed single precomputed SHA-256 check
-uv run hush.py -m manifest.json --checkhash <sha256_hex_digest>
+uv run hush.py --checkhash <sha256_hex_digest>
 
 # Test mode (project-root test_manifest.json)
 uv run hush.py --test -u USERNAME -p PASSWORD
@@ -400,7 +422,7 @@ Logs are stored in `logs/hushclient.log`, with three rotated backups (`hushclien
 
 The UI previews the latest 256 KiB; the download combines all retained files from oldest to newest. Settings are saved in `logs/settings.json`. Docker Compose mounts `./logs` so diagnostics and settings survive container recreation. Set `HUSHCLIENT_LOG_DIR` to change this directory outside Docker, or mount the matching directory when overriding it in Docker.
 
-Scheduled updates retry failed filter sync/download stages every five minutes, for up to one hour after the original scheduled start. Each attempt is recorded in history and the log file. Existing partial downloads are reused by the downloader. The sync page shows the next retry and the window deadline. No new retry begins after the deadline; an attempt already running may finish later. Manifest-generation and reload failures do not trigger download retries. Changing or disabling the schedule cancels pending retries; a running attempt is allowed to finish. Restarting the app resets a pending retry window, and the next daily schedule applies.
+Scheduled updates retry failed filter sync/download stages every five minutes, for up to one hour after the original scheduled start. Each attempt is recorded in history and the log file. Existing active groups are reused after checksum verification. Each attempt stages incoming files in a fresh generation; incomplete generations may remain for diagnosis and use disk space. The sync page shows the next retry and the window deadline. No new retry begins after the deadline; an attempt already running may finish later. Manifest-generation and reload failures do not trigger download retries. Changing or disabling the schedule cancels pending retries; a running attempt is allowed to finish. Restarting the app resets a pending retry window, and the next daily schedule applies.
 
 ## CLI Usage
 
@@ -461,7 +483,7 @@ UI assets are stored in:
 Behavior:
 - `/ui-check` accepts `username` and `password`
 - `/ui-check` lowercases the username, computes a SHA-256 digest client-side in JavaScript, displays it, and sends `POST /checkhash`
-- `/ui-sync` provides a top-level one-click action to sync filters, update `manifest.json`, and reload the in-memory filters in sequence
+- `/ui-sync` provides a top-level one-click action to stage filters, prepare a candidate manifest, validate all groups, and activate the new manager in sequence
 - `/ui-sync` also provides manual `sync filters from nWebbed`, `update manifest`, and `reload with new filters` actions
 - `/ui-sync` calls `POST /sync/apply`, `POST /sync/filters`, `POST /sync/manifest`, and `POST /sync/reload` and renders the outputs on screen
 
@@ -477,15 +499,21 @@ Each step waits for the previous step to finish. If any step fails, the sequence
 
 Poll `GET /sync/status` for live logs and the final result payload. Once `active` becomes `false`, the operation is complete and the status payload contains the final `success`, `detail`, logs, and any apply result fields such as `downloaded`, `manifest_path`, `output_file`, and `filter_count`.
 
+The hosted Sync UI uses one Server-Sent Events (SSE) connection to `GET /sync/events` for live operation status, auto-update settings/history, and cleanup file totals. The REST endpoints `GET /sync/status`, `GET /sync/auto-update`, and `GET /sync/cleanup/files/status` remain available with their existing response formats; commands and schedule changes still use HTTP POST/PUT. The UI falls back to polling while the stream is unavailable and returns to SSE when it reconnects. Idle hidden tabs close the stream and reconnect when visible; an operation or file totals refresh started by the tab continues to receive completion updates while hidden.
+
+The event stream sends named `sync-status`, `auto-update`, and `cleanup-status` events, each containing a complete snapshot in the corresponding REST response format. Every connection, including a reconnect, starts with fresh snapshots; events are not replayed. Changes are published from manual and scheduled operations, including logs, progress, schedule edits, history, retry state, and background inventory scans. Bursts are coalesced over 100 ms, with only dirty topics retained per connection so slow readers cannot accumulate an event queue. Idle connections receive a comment heartbeat every 15 seconds. The server clock advances locally in the UI between schedule snapshots. No periodic status GETs are made while SSE is available, including while refreshing cleanup totals.
+
+The SSE response sets `X-Accel-Buffering: no` and `Cache-Control: no-cache, no-transform`. The supplied nginx proxy honors this header; other reverse proxies must also disable buffering/caching for `/sync/events` and allow a long-running response. SSE uses ordinary HTTPS and the existing internal mTLS connection, with no WebSocket dependency or upgrade configuration.
+
 ### `POST /sync/filters`
-Triggers the filter sync workflow, including manifest download, zip verification, extraction, and filter MD5 verification.
+Stages replacement files in an isolated generation, including manifest download, zip verification, extraction, and filter MD5 verification. Success here means the candidate is checksum-verified; it is not yet active.
 
 Response:
 ```json
 {
   "success": true,
-  "manifest_path": "filters/manifest_current.json",
-  "downloaded": ["filters/202604/20260401_20260408/20260401_20260408.zip"],
+  "manifest_path": "filters/.generations/<id>/manifest_current.json",
+  "downloaded": ["filters/.generations/<id>/202604/20260401_20260408/20260401_20260408.zip"],
   "redownloaded": [],
   "verified_existing": [],
   "logs": [
@@ -497,10 +525,10 @@ Response:
 ```
 
 ### `POST /sync/manifest`
-Regenerates `manifest.json` from the local `filters/` tree using `helpers/generate_manifest.py`.
+Prepares or checks `filters/.pending_manifest.json`. The active manifest and running filters are unchanged until validated reload succeeds.
 
 ### `POST /sync/reload`
-Loads files from the configured manifest without restarting the API process. A complete load replaces the active manager and closes its previous mappings; incomplete loads keep the previous manager. Superseded filters then follow the configured cleanup policy.
+Validates the pending candidate (or revalidates the current configured manifest) without restarting the API. Every group must have 256 loadable shards and pass its declared credential suite: 256 checks for `shard-canaries-v1`, or the original four for legacy groups. Success atomically publishes the active manifest, swaps the manager, drains old readers, and then applies cleanup. Validation or publication failures keep the previous active filters and manifest.
 
 ### `POST /check`
 Request:

@@ -28,10 +28,13 @@ from filter_sync.r2_client import R2ClientError
 from filter_sync.sync import SyncError, sync_filters, _machine_id_from_mac
 from diagnostic_logs import LogSettings, install_logging, uninstall_logging
 from alerts import AlertManager, AlertSettings
+from sync_events import SyncEvents
 from certificates import alert_certificate_issues, inspect_certificates
 from filter_sync import progress as sync_progress
 from filter_sync.cleanup import CleanupSettings, FilterCleanup
 from filter_sync.inventory_job import InventoryJob
+from filter_sync import activation
+from filter_sync.settings import SyncSettings, load_settings as load_sync_settings, save_settings as save_sync_settings
 from fastapi.openapi.docs import get_swagger_ui_html
 from helpers.generate_manifest import generate_manifest, _build_location_map, _resolve_manifest_filter_path
 
@@ -39,12 +42,15 @@ from helpers.generate_manifest import generate_manifest, _build_location_map, _r
 # Global filter manager
 filter_manager: Optional[FilterManager] = None
 operation_lock = threading.Lock()
+manager_condition = threading.Condition()
+manager_readers: dict[int, int] = {}
 logger = logging.getLogger("uvicorn.error")
 sync_logger = logging.getLogger("hushclient.sync")
 diagnostic_logs = None
 alert_manager: AlertManager | None = None
 filter_cleanup: FilterCleanup | None = None
-cleanup_inventory_job = InventoryJob()
+sync_events = SyncEvents()
+cleanup_inventory_job = InventoryJob(on_change=lambda: sync_events.publish("cleanup-status"))
 CERTIFICATE_CHECK_INTERVAL_SECONDS = 3600
 AUTO_UPDATE_RETRY_SECONDS = 300
 AUTO_UPDATE_RETRY_WINDOW_SECONDS = 3600
@@ -53,12 +59,15 @@ _auto_update_retry_until: str | None = None
 AUTO_UPDATE_HISTORY_LIMIT = 20
 AUTO_UPDATE_STATE_PATH = "filters/.auto_update_state.json"
 
+
 _auto_update_state_lock = threading.Lock()
 _auto_update_enabled = False
 _auto_update_hour: int | None = None
 _auto_update_history: list[dict[str, object]] = []
 _auto_update_active_since: str | None = None
 _auto_update_wake_event: asyncio.Event | None = None
+SYNC_EVENT_HEARTBEAT_SECONDS = 15
+SYNC_EVENT_BATCH_SECONDS = 0.1
 
 
 class _SyncOperationLogState:
@@ -83,17 +92,18 @@ class _SyncOperationLogState:
             self._result = {}
             phases = ["prepare", "download", "extract", "verify"]
             if operation in {"sync_apply", "auto_sync_apply"}:
-                phases += ["manifest", "reload"]
+                phases += ["manifest", "validate", "reload"]
             elif operation == "sync_manifest":
                 phases = ["manifest"]
             elif operation == "sync_reload":
-                phases = ["reload"]
+                phases = ["validate", "reload"]
             self._progress = {
                 phase: {"phase": phase, "status": "pending", "completed": 0,
                         "total": None, "detail": ""} for phase in phases
             }
             self._progress[phases[0]]["status"] = "running"
             self._current_phase = phases[0]
+        sync_events.publish("sync-status", "auto-update")
 
     def update_progress(self, phase, completed=0, total=None, detail="", status="running") -> None:
         with self._lock:
@@ -101,10 +111,12 @@ class _SyncOperationLogState:
                 self._current_phase = phase
                 self._progress[phase] = {"phase": phase, "status": status,
                                          "completed": completed, "total": total, "detail": detail}
+        sync_events.publish("sync-status")
 
     def append(self, line: str) -> None:
         with self._lock:
             self._logs.append(line)
+        sync_events.publish("sync-status")
 
     def set_result(self, payload: dict[str, object]) -> None:
         sync_logger.log(logging.INFO if payload.get("success") else logging.ERROR,
@@ -134,15 +146,17 @@ class _SyncOperationLogState:
                 for key, value in payload.items()
                 if key not in {"success", "detail", "logs", "test_mode"}
             }
+        sync_events.publish("sync-status")
 
         if payload.get("success") is False:
-            event = "filter_failure" if self._operation in {"sync_manifest", "sync_reload"} or failed_phase in {"manifest", "reload"} else "sync_failure"
+            event = "filter_failure" if self._operation in {"sync_manifest", "sync_reload"} or failed_phase in {"manifest", "validate", "reload"} else "sync_failure"
             trigger = "Scheduled" if self._operation == "auto_sync_apply" else "Manual"
             _notify_alert(event, f"{trigger} filter operation failed during {failed_phase or self._operation}.")
 
     def finish(self) -> None:
         with self._lock:
             self._active = False
+        sync_events.publish("sync-status", "auto-update")
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -245,7 +259,7 @@ async def lifespan(app: FastAPI):
     certificate_task: asyncio.Task[None] | None = None
     
     global diagnostic_logs, alert_manager, filter_cleanup, cleanup_inventory_job
-    cleanup_inventory_job = InventoryJob()
+    cleanup_inventory_job = InventoryJob(on_change=lambda: sync_events.publish("cleanup-status"))
     filter_cleanup = None
     diagnostic_logs, attached = install_logging()
     alert_manager = AlertManager(Path(os.getenv("HUSHCLIENT_ALERT_SETTINGS_PATH", "filters/.alerts.json")))
@@ -311,9 +325,7 @@ async def lifespan(app: FastAPI):
                 await auto_update_task
         _auto_update_wake_event = None
         try:
-            if filter_manager:
-                filter_manager.close()
-                logger.info("Closed all filters")
+            await asyncio.to_thread(_close_active_filters)
         except Exception:
             logger.exception("Error closing filters")
             raise
@@ -573,7 +585,9 @@ async def endpoints():
             "sync_filters": "/sync/filters",
             "sync_apply": "/sync/apply",
             "sync_status": "/sync/status",
+            "sync_events": "/sync/events",
             "auto_update": "/sync/auto-update",
+            "sync_settings": "/sync/settings",
             "filter_cleanup": "/sync/cleanup",
             "superseded_filters": "/sync/cleanup/files",
             "delete_superseded_filters": "/sync/cleanup/delete",
@@ -781,7 +795,7 @@ async def check_credential(request: CheckRequest):
     if filter_manager is None:
         raise HTTPException(status_code=503, detail="Filter manager not initialized")
     
-    result = filter_manager.check(request.username, request.password)
+    result = _filter_call("check", request.username, request.password)
     
     return CheckResponse(
         # username=result.username,
@@ -807,7 +821,7 @@ async def check_credential_get(
     if filter_manager is None:
         raise HTTPException(status_code=503, detail="Filter manager not initialized")
     
-    result = filter_manager.check(username, password)
+    result = _filter_call("check", username, password)
     
     return CheckResponse(
         # username=result.username,
@@ -831,7 +845,7 @@ async def check_credentials_batch(request: BatchCheckRequest):
         raise HTTPException(status_code=503, detail="Filter manager not initialized")
     
     credentials = [(cred.username, cred.password) for cred in request.credentials]
-    results = filter_manager.check_batch(credentials)
+    results = _filter_call("check_batch", credentials)
     
     found_usernames = []
     seen = set()
@@ -861,7 +875,7 @@ async def check_precomputed_sha256(request: SingleHashCheckRequest):
         raise HTTPException(status_code=503, detail="Filter manager not initialized")
 
     try:
-        result = filter_manager.check_sha256_hash(request.hash)
+        result = _filter_call("check_sha256_hash", request.hash)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -885,7 +899,7 @@ async def check_precomputed_sha256_batch(request: BatchHashCheckRequest):
         raise HTTPException(status_code=503, detail="Filter manager not initialized")
 
     try:
-        results = filter_manager.check_sha256_batch(request.hashes)
+        results = _filter_call("check_sha256_batch", request.hashes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -907,8 +921,7 @@ async def sync_filters_endpoint():
     """
     Download, verify, and extract filters from nWebbed storage.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     triggered_at = datetime.now().astimezone()
     response: SyncFiltersResponse | None = None
@@ -924,6 +937,7 @@ async def sync_filters_endpoint():
             _record_sync_history("manual", "sync_filters", triggered_at, response)
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.post("/sync/apply", response_model=SyncApplyStartResponse, status_code=202, tags=["Sync"])
@@ -931,8 +945,7 @@ async def sync_apply_endpoint():
     """
     Start filter sync, manifest update, and filter reload in a background thread.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     sync_operation_logs.start("sync_apply")
     try:
@@ -959,8 +972,7 @@ async def update_manifest_endpoint():
     """
     Regenerate manifest.json from the local filters directory.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     try:
         sync_operation_logs.start("sync_manifest")
@@ -972,6 +984,7 @@ async def update_manifest_endpoint():
     finally:
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.post("/sync/reload", response_model=ReloadFiltersResponse, tags=["Sync"])
@@ -979,8 +992,7 @@ async def reload_filters_endpoint():
     """
     Reload manifest/filter files into memory without restarting the API process.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     try:
         sync_operation_logs.start("sync_reload")
@@ -992,6 +1004,7 @@ async def reload_filters_endpoint():
     finally:
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.get("/sync/status", response_model=SyncStatusResponse, tags=["Sync"])
@@ -1004,6 +1017,59 @@ async def sync_status_endpoint():
 async def auto_update_status_endpoint():
     """Return scheduler settings, its next run, and recent manual/automatic sync history."""
     return AutoUpdateStatusResponse(**_auto_update_status_snapshot())
+
+
+async def _sync_event_stream(request: Request):
+    # Subscribe before reading snapshots so a concurrent change cannot be missed.
+    with sync_events.subscribe() as changed:
+        yield "retry: 3000\n\n"
+        topics = {"sync-status", "auto-update", "cleanup-status"}
+        while not await request.is_disconnected():
+            for topic in ("auto-update", "sync-status", "cleanup-status"):
+                if topic not in topics:
+                    continue
+                if topic == "cleanup-status":
+                    data = json.dumps(cleanup_inventory_job.snapshot())
+                else:
+                    payload = (SyncStatusResponse(**sync_operation_logs.snapshot()) if topic == "sync-status"
+                               else AutoUpdateStatusResponse(**_auto_update_status_snapshot()))
+                    data = payload.model_dump_json()
+                yield f"event: {topic}\ndata: {data}\n\n"
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=SYNC_EVENT_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+            else:
+                # Collapse bursts of log/progress changes, including for slow readers.
+                await asyncio.sleep(SYNC_EVENT_BATCH_SECONDS)
+            topics = sync_events.take(changed)
+
+
+@app.get("/sync/events", tags=["Sync"], response_class=StreamingResponse,
+         responses={200: {"content": {"text/event-stream": {}}}})
+async def sync_events_endpoint(request: Request):
+    """Stream current sync/schedule snapshots on connect and when state changes."""
+    return StreamingResponse(_sync_event_stream(request), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+    })
+
+
+@app.get("/sync/settings", response_model=SyncSettings, tags=["Sync"])
+async def get_sync_settings():
+    return await run_in_threadpool(load_sync_settings)
+
+
+@app.put("/sync/settings", response_model=SyncSettings, tags=["Sync"])
+async def configure_sync_settings(settings: SyncSettings):
+    if not operation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A filter operation is in progress; try again when it finishes")
+    try:
+        return await run_in_threadpool(save_sync_settings, settings)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not save sync settings") from exc
+    finally:
+        operation_lock.release()
 
 
 @app.get("/sync/cleanup", response_model=CleanupSettings, tags=["Sync"])
@@ -1031,8 +1097,7 @@ async def configure_filter_cleanup(settings: CleanupSettings):
 def _initialize_filter_cleanup() -> dict:
     """Initialize and discover existing files without delaying application readiness."""
     global filter_cleanup
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A filter operation is running. Refresh file totals when it finishes.")
+    operation_lock.acquire()
     try:
         cleanup = FilterCleanup(Path("filters"), Path(os.getenv(
             "HUSHCLIENT_FILTER_CLEANUP_STATE_PATH", "filters/.cleanup_state.json")))
@@ -1046,9 +1111,24 @@ def _initialize_filter_cleanup() -> dict:
         operation_lock.release()
 
 
+async def _acquire_operation_lock():
+    # Waiting requests must not occupy every thread-pool slot: the operation
+    # holding the lock may still need a worker to finish and release it.
+    while not operation_lock.acquire(blocking=False):
+        await asyncio.sleep(0.1)
+
+
 def _inspect_or_delete_superseded_filters(confirmation_token: str | None = None, *, wait: bool = False) -> dict:
     if not operation_lock.acquire(blocking=wait):
         raise HTTPException(status_code=409, detail="A filter operation is in progress; try again when it finishes")
+    try:
+        return _inspect_or_delete_superseded_filters_locked(confirmation_token)
+    finally:
+        operation_lock.release()
+
+
+def _inspect_or_delete_superseded_filters_locked(confirmation_token: str | None = None) -> dict:
+    """Inspect and revalidate deletion with operation_lock held by the caller."""
     try:
         cleanup = filter_cleanup
         if cleanup is None or _is_test_mode_enabled():
@@ -1074,13 +1154,22 @@ def _inspect_or_delete_superseded_filters(confirmation_token: str | None = None,
     except (OSError, ValueError, KeyError, TypeError):
         sync_logger.exception("Could not inspect or delete superseded filters")
         raise HTTPException(status_code=500, detail="Could not inspect or delete superseded filters. Refresh and check diagnostic logs.") from None
-    finally:
-        operation_lock.release()
 
 
 @app.get("/sync/cleanup/files", tags=["Sync"])
 async def get_superseded_filter_inventory():
     return await run_in_threadpool(_inspect_or_delete_superseded_filters)
+
+
+def _scan_cleanup_inventory():
+    if filter_cleanup is None:
+        return _initialize_filter_cleanup()
+    return _inspect_or_delete_superseded_filters(wait=True)
+
+
+def _refresh_cleanup_inventory(*, rerun=True):
+    if not _is_test_mode_enabled():
+        cleanup_inventory_job.start(_scan_cleanup_inventory, rerun=rerun)
 
 
 @app.post("/sync/cleanup/files/refresh", status_code=202, tags=["Sync"])
@@ -1090,8 +1179,7 @@ async def refresh_superseded_filter_inventory():
         return cleanup_inventory_job.snapshot()
     if _is_test_mode_enabled():
         raise HTTPException(status_code=503, detail="Filter cleanup is unavailable (or test mode is enabled)")
-    cleanup_inventory_job.start(_initialize_filter_cleanup if filter_cleanup is None
-                                else lambda: _inspect_or_delete_superseded_filters(wait=True))
+    _refresh_cleanup_inventory(rerun=False)
     return cleanup_inventory_job.snapshot()
 
 
@@ -1103,7 +1191,13 @@ async def superseded_filter_inventory_status():
 @app.post("/sync/cleanup/delete", tags=["Sync"])
 async def delete_superseded_filters(request: CleanupDeleteRequest):
     """Delete the confirmed set of superseded filters, regardless of retention settings."""
-    return await run_in_threadpool(_inspect_or_delete_superseded_filters, request.confirmation_token)
+    await _acquire_operation_lock()
+    try:
+        return await run_in_threadpool(_inspect_or_delete_superseded_filters_locked,
+                                     request.confirmation_token)
+    finally:
+        operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.put("/sync/auto-update", response_model=AutoUpdateStatusResponse, tags=["Sync"])
@@ -1145,7 +1239,8 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
     try:
         sync_operation_logs.update_progress("prepare", detail="Fetching credentials and remote manifest")
         with sync_progress.listen(sync_operation_logs.update_progress):
-            result = sync_filters()
+            result = activation.stage_sync(sync_filters,
+                [path for path, _ in filter_manager.filters] if filter_manager else [])
     except (R2ClientError, SyncError) as exc:
         sync_logger.exception("Filter sync failed")
         capture_handler.flush()
@@ -1186,64 +1281,33 @@ def _run_filter_sync_with_logs() -> SyncFiltersResponse:
 
 
 def _run_manifest_update_with_logs() -> ManifestUpdateResponse:
-    sync_operation_logs.update_progress("manifest", detail="Generating local manifest")
-    log_stream = StringIO()
-    stdout_stream = StringIO()
-    stderr_stream = StringIO()
-    handler = logging.StreamHandler(log_stream)
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
-
-    manifest_logger = logging.getLogger("helpers.generate_manifest")
-    previous_level = manifest_logger.level
-    previous_propagate = manifest_logger.propagate
-    manifest_logger.setLevel(logging.DEBUG)
-    manifest_logger.propagate = True
-    manifest_logger.addHandler(handler)
-
+    output = activation.pending_path()
+    sync_operation_logs.update_progress("manifest", detail="Preparing candidate manifest without changing the active set")
+    logs = []
     try:
-        with redirect_stdout(stdout_stream), redirect_stderr(stderr_stream):
-            exit_code = generate_manifest("filters", "manifest.json")
+        if not output.exists():
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if activation.active_path().exists():
+                payload = json.loads(activation.active_path().read_text(encoding="utf-8"))
+                activation.atomic_json(output, payload)
+            else:
+                stream = StringIO()
+                with redirect_stdout(stream), redirect_stderr(stream):
+                    code = generate_manifest("filters", str(output))
+                logs.extend(_split_log_lines(stream.getvalue()))
+                if code:
+                    raise SyncError("generate_manifest failed")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        if not payload.get("filters"):
+            raise SyncError("Candidate manifest is empty")
+        if "verified_files" in payload:
+            activation.check_identities(payload)
+        return ManifestUpdateResponse(success=True, output_file=str(output),
+                                      filter_count=len(payload["filters"]), logs=logs)
     except Exception as exc:
-        manifest_logger.exception("Manifest update failed")
-        handler.flush()
-        logs = _merge_output_logs(log_stream, stdout_stream, stderr_stream)
-        return ManifestUpdateResponse(
-            success=False,
-            logs=logs,
-            detail=f"Unexpected manifest update error: {exc}",
-        )
-    finally:
-        manifest_logger.removeHandler(handler)
-        manifest_logger.setLevel(previous_level)
-        manifest_logger.propagate = previous_propagate
-        handler.close()
-
-    logs = _merge_output_logs(log_stream, stdout_stream, stderr_stream)
-    if exit_code != 0:
-        sync_logger.error("Manifest generation failed: %s", "\n".join(logs))
-        return ManifestUpdateResponse(
-            success=False,
-            output_file="manifest.json",
-            logs=logs,
-            detail="generate_manifest failed",
-        )
-
-    try:
-        with open("manifest.json", "r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
-        filter_count = len(manifest.get("filters", []))
-    except Exception:
-        sync_logger.exception("Could not read generated manifest")
-        return ManifestUpdateResponse(success=False, output_file="manifest.json", logs=logs,
-                                      detail="Could not read generated manifest")
-
-    return ManifestUpdateResponse(
-        success=True,
-        output_file="manifest.json",
-        filter_count=filter_count,
-        logs=logs,
-    )
+        sync_logger.exception("Candidate manifest preparation failed")
+        return ManifestUpdateResponse(success=False, output_file=str(output), logs=logs,
+                                      detail=f"Candidate manifest preparation failed: {exc}")
 
 
 def _run_sync_apply_with_logs() -> SyncApplyResponse:
@@ -1295,7 +1359,6 @@ def _run_sync_apply_with_logs() -> SyncApplyResponse:
         )
 
     sync_operation_logs.update_progress("manifest", 1, 1, status="complete")
-    sync_operation_logs.update_progress("reload", detail="Loading filters into memory")
     logs.append("INFO step 3/3: reload filters")
     _append_live_sync_log("INFO step 3/3: reload filters")
     reload_response = _run_filter_reload_with_logs()
@@ -1352,44 +1415,121 @@ def _run_sync_apply_background_job() -> None:
             _record_sync_history("manual", "sync_apply", triggered_at, response)
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
+
+
+def _filter_call(method, *args):
+    """Lease one manager for the entire request, including batch lookups."""
+    with manager_condition:
+        manager = filter_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Filter manager not initialized")
+        key = id(manager)
+        manager_readers[key] = manager_readers.get(key, 0) + 1
+    try:
+        return getattr(manager, method)(*args)
+    finally:
+        with manager_condition:
+            manager_readers[key] -= 1
+            if not manager_readers[key]:
+                del manager_readers[key]
+                manager_condition.notify_all()
+
+
+def _publish_filter_manager(candidate, payload, *, persist=True):
+    global filter_manager
+    # Do not hold the request lease lock during filesystem I/O.
+    if persist:
+        activation.atomic_json(activation.active_path(), payload)
+    with manager_condition:
+        # Commit the durable pointer first. A crash here restarts on the fully
+        # validated generation; a failed write leaves the old manager active.
+        previous = filter_manager
+        filter_manager = candidate
+        if previous is not None:
+            while manager_readers.get(id(previous), 0):
+                manager_condition.wait()
+    if previous is not None:
+        try:
+            previous.close()
+        except Exception:
+            sync_logger.exception("Could not release previous filter mappings")
+    return previous
+
+
+def _close_active_filters():
+    global filter_manager
+    with operation_lock:
+        with manager_condition:
+            previous = filter_manager
+            filter_manager = None
+            while previous is not None and manager_readers.get(id(previous), 0):
+                manager_condition.wait()
+        if previous is not None:
+            previous.close()
+            logger.info("Closed all filters")
 
 
 def _run_filter_reload_with_logs() -> ReloadFiltersResponse:
-    global filter_manager
-    sync_operation_logs.update_progress("reload", detail="Loading filters into memory")
-
-    logs: list[str] = []
+    candidate = None
+    published = False
+    logs = []
+    def log(line):
+        logs.append(line)
+        _append_live_sync_log(line)
     try:
-        manifest_path = _current_filter_configuration()
-        new_manager = FilterManager(manifest_path=manifest_path)
-        if len(new_manager.filters) != getattr(new_manager, "_requested_filter_count", len(new_manager.filters)):
-            new_manager.close()
-            raise RuntimeError("Some configured filters could not be loaded; keeping previous filters active")
-        logs.append(f"INFO loaded {len(new_manager.filters)} filters from {manifest_path}")
-
-        old_manager = filter_manager
-        filter_manager = new_manager
-        if old_manager is not None:
-            old_manager.close()
-            logs.append("INFO closed previous filter mappings")
-
-        _check_loaded_filters()
-        _record_loaded_filter_cleanup()
-        stats = new_manager.get_stats()
-        return ReloadFiltersResponse(
-            success=True,
-            filter_count=stats["filter_count"],
-            filters=stats["filters"],
-            max_nk=stats["max_nk"],
-            logs=logs,
-        )
+        test_mode = _is_test_mode_enabled()
+        if test_mode:
+            source = Path(_current_filter_configuration())
+            payload, pending = json.loads(source.read_text(encoding="utf-8")), False
+        else:
+            source, payload, pending = activation.load_candidate(_current_filter_configuration())
+        sync_operation_logs.update_progress("validate", detail="Checking candidate integrity and loading all shards")
+        if pending and "verified_files" in payload:
+            activation.check_identities(payload)
+        else:
+            payload = activation.verify_manual_manifest(payload, sync_operation_logs.update_progress)
+        candidate = FilterManager(manifest_path=str(source))
+        if len(candidate.filters) != getattr(candidate, "_requested_filter_count", len(candidate.filters)):
+            raise SyncError("Some configured filters could not be loaded; keeping previous filters active")
+        groups = activation.validate_groups(candidate, payload,
+            sync_operation_logs.update_progress, log, test_mode=test_mode)
+        log(f"INFO candidate validated: {groups} groups; all required test credentials passed in every group")
+        try:
+            activation.inspect_retained_groups(candidate, Path("filters"), log)
+        except Exception as exc:
+            log(f"WARNING retained group diagnostics unavailable: {exc}; candidate validation passed")
+        # All potentially failing reads/stats finish before the activation commit.
+        stats = candidate.get_stats()
+        activation.check_identities(payload)
+        sync_operation_logs.update_progress("reload", detail="Publishing validated filters and waiting for existing requests")
+        previous = _publish_filter_manager(candidate, payload, persist=not test_mode)
+        published = True
+        log(f"INFO activated {len(candidate.filters)} validated filters")
+        if previous is not None:
+            log("INFO drained existing requests and closed previous filter mappings")
+        # The authoritative manifest embeds its source manifest. This compatibility
+        # copy is recoverable and must not turn a completed commit into a failure.
+        try:
+            if "source_manifest" in payload and not test_mode:
+                activation.atomic_json(Path("filters/manifest_current.json"), payload["source_manifest"])
+            if pending:
+                source.unlink(missing_ok=True)
+        except OSError:
+            sync_logger.exception("Activation succeeded; could not update compatibility metadata")
+        try:
+            _check_loaded_filters()
+            _record_loaded_filter_cleanup()
+        except Exception:
+            sync_logger.exception("Activation succeeded; post-activation diagnostics deferred")
+        return ReloadFiltersResponse(success=True, filter_count=stats["filter_count"],
+            filters=stats["filters"], max_nk=stats["max_nk"], logs=logs)
     except Exception as exc:
-        sync_logger.exception("Filter reload failed")
-        return ReloadFiltersResponse(
-            success=False,
-            logs=logs,
-            detail=f"Failed to reload filters: {exc}",
-        )
+        if candidate is not None and not published:
+            candidate.close()
+        sync_logger.exception("Candidate validation or activation failed")
+        return ReloadFiltersResponse(success=False, logs=logs,
+            detail=f"Candidate validation or activation failed: {exc}")
 
 
 def _cleanup_protected_paths() -> list[str]:
@@ -1399,12 +1539,19 @@ def _cleanup_protected_paths() -> list[str]:
     if manifest_path.exists():
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         paths.extend(data["filters"])
+    else:
+        data = {}
+    pending = activation.pending_path()
+    if pending.exists():
+        paths.extend(json.loads(pending.read_text(encoding="utf-8"))["filters"])
     remote_path = Path("filters/manifest_current.json")
-    if remote_path.exists():
-        data = json.loads(remote_path.read_text(encoding="utf-8"))
-        location_map = _build_location_map(data.get("current_filter_locations", []))
+    remote = data.get("source_manifest")
+    if remote is None and remote_path.exists():
+        remote = json.loads(remote_path.read_text(encoding="utf-8"))
+    if remote is not None and "source_manifest" not in data:
+        location_map = _build_location_map(remote.get("current_filter_locations", []))
         paths.extend(str(Path("filters") / _resolve_manifest_filter_path(
-            entry["path"], location_map=location_map)) for entry in data["current_filter_files"])
+            entry["path"], location_map=location_map)) for entry in remote["current_filter_files"])
     return paths
 
 
@@ -1425,6 +1572,8 @@ def _record_loaded_filter_cleanup(*, delete_expired: bool = True) -> None:
 def _current_filter_configuration() -> str:
     is_test_mode = _is_test_mode_enabled()
     default_manifest = "test_manifest.json" if is_test_mode else "manifest.json"
+    if not is_test_mode and activation.active_path().exists():
+        return str(activation.active_path())
     return os.getenv("MANIFEST_PATH", default_manifest)
 
 
@@ -1551,6 +1700,7 @@ def _set_auto_update_config(enabled: bool, hour: int | None) -> None:
             _auto_update_enabled = previous_enabled
             _auto_update_hour = previous_hour
             raise
+    sync_events.publish("auto-update")
 
 
 def _auto_update_config() -> tuple[bool, int | None]:
@@ -1567,6 +1717,7 @@ def _append_auto_update_history(entry: dict[str, object]) -> None:
             _persist_auto_update_state_locked()
         except OSError as exc:
             logger.error("Could not persist auto-update history: %s", exc)
+    sync_events.publish("auto-update")
 
 
 def _record_sync_history(
@@ -1673,6 +1824,7 @@ async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asynci
     global _auto_update_retry_at, _auto_update_retry_until
     deadline = scheduled_at + timedelta(seconds=AUTO_UPDATE_RETRY_WINDOW_SECONDS)
     _auto_update_retry_until = deadline.isoformat(timespec="seconds")
+    sync_events.publish("auto-update")
     try:
         while True:
             response = await asyncio.to_thread(_run_scheduled_auto_update)
@@ -1687,6 +1839,7 @@ async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asynci
                 wake_event.clear()
                 return
             _auto_update_retry_at = retry_at.isoformat(timespec="seconds")
+            sync_events.publish("auto-update")
             sync_logger.warning("Scheduled sync will retry at %s; deadline %s", _auto_update_retry_at, _auto_update_retry_until)
             try:
                 await asyncio.wait_for(wake_event.wait(), timeout=AUTO_UPDATE_RETRY_SECONDS)
@@ -1694,34 +1847,21 @@ async def _run_scheduled_retry_window(scheduled_at: datetime, wake_event: asynci
                 if datetime.now().astimezone() >= deadline:
                     return
                 _auto_update_retry_at = None
+                sync_events.publish("auto-update")
             else:
                 wake_event.clear()
                 return
     finally:
         _auto_update_retry_at = None
         _auto_update_retry_until = None
+        sync_events.publish("auto-update")
 
 
 def _run_scheduled_auto_update() -> SyncApplyResponse | None:
     global _auto_update_active_since
 
     triggered_at = datetime.now().astimezone()
-    if not operation_lock.acquire(blocking=False):
-        logger.info("Skipping scheduled auto update because another filter operation is already in progress")
-        completed_at = datetime.now().astimezone()
-        _append_auto_update_history({
-            "triggered_at": triggered_at.isoformat(timespec="seconds"),
-            "completed_at": completed_at.isoformat(timespec="seconds"),
-            "status": "skipped",
-            "trigger": "scheduled",
-            "operation": "sync_apply",
-            "filter_count": 0,
-            "detail": "Another filter operation was already in progress",
-            "downloaded": [],
-            "redownloaded": [],
-            "verified_existing": [],
-        })
-        return
+    operation_lock.acquire()
 
     response: SyncApplyResponse | None = None
     try:
@@ -1754,6 +1894,7 @@ def _run_scheduled_auto_update() -> SyncApplyResponse | None:
         with _auto_update_state_lock:
             _auto_update_active_since = None
         operation_lock.release()
+        _refresh_cleanup_inventory()
     return response
 
 

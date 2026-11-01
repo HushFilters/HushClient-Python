@@ -15,7 +15,10 @@ from zipfile import ZipFile
 import requests
 
 from .r2_client import R2Client, R2ClientError, R2Config
+from .canaries import manifest_test_sets
 from .progress import report, segment
+from .settings import load_settings
+from helpers.generate_manifest import _build_location_map, _resolve_manifest_filter_path
 
 DEFAULT_BUCKET = "hushfilters"
 REMOTE_FILTERS_PREFIX = "filters"
@@ -23,6 +26,7 @@ REMOTE_MANIFEST_NAME = "manifest_current.json"
 REMOTE_UPLOAD_MANIFEST_NAME = "upload_manifest.json"
 LOCAL_FILTER_VERIFICATION_LOG_INTERVAL = 5
 LOCAL_FILTER_EXTRACTION_LOG_INTERVAL = 25
+VERIFICATION_METADATA_FIELDS = ("device", "inode", "size", "mtime_ns", "ctime_ns")
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +94,11 @@ class FilterManifest:
         except json.JSONDecodeError as exc:
             raise SyncError("Downloaded manifest is not valid JSON") from exc
 
+        try:
+            manifest_test_sets(data)
+        except ValueError as exc:
+            raise SyncError(str(exc)) from exc
+
         locations = tuple(data.get("current_filter_locations", []))
         zip_entries = tuple(
             ManifestZip.from_dict(entry)
@@ -137,12 +146,48 @@ class UploadManifest:
 
 
 @dataclass(frozen=True)
+class VerifiedFilter:
+    path: Path
+    md5: str
+    size: int
+    mtime_ns: int
+    device: int | None = None
+    inode: int | None = None
+    ctime_ns: int | None = None
+
+    def record(self) -> dict:
+        return {"md5": self.md5, "size": self.size, "mtime_ns": self.mtime_ns,
+                "device": self.device, "inode": self.inode, "ctime_ns": self.ctime_ns}
+
+
+def file_metadata(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _verification_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve()))
+
+
+def _load_verification_records(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("version") == 1 and isinstance(payload.get("files"), dict):
+            return payload["files"]
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, AttributeError):
+        logger.warning("Could not read MD5 verification records; rehashing filters", exc_info=True)
+    return {}
+
+
+@dataclass(frozen=True)
 class SyncResult:
     manifest_path: Path
     filters_dir: Path
     downloaded: tuple[Path, ...]
     redownloaded: tuple[Path, ...]
     verified_existing: tuple[Path, ...]
+    verified_filters: tuple[VerifiedFilter, ...] = ()
 
 
 class ObjectDownloader(Protocol):
@@ -157,12 +202,15 @@ def sync_filters(
     env_path: Path | None = None,
     bucket: str = DEFAULT_BUCKET,
     downloader: ObjectDownloader | None = None,
+    staging_dir: Path | None = None,
+    reuse_locations: dict[str, Path] | None = None,
+    reuse_verified_md5: bool | None = None,
 ) -> SyncResult:
     resolved_base_dir = (
         base_dir if base_dir is not None else Path(__file__).resolve().parent
     )
     project_root = resolved_base_dir.parent
-    filters_dir = project_root / "filters"
+    filters_dir = staging_dir if staging_dir is not None else project_root / "filters"
     filters_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = filters_dir / REMOTE_MANIFEST_NAME
 
@@ -176,12 +224,23 @@ def sync_filters(
     remote_manifest_key = f"{REMOTE_FILTERS_PREFIX}/{REMOTE_MANIFEST_NAME}"
     manifest_payload = active_downloader.download_text(remote_manifest_key)
     manifest = FilterManifest.from_json(manifest_payload)
+    if reuse_verified_md5 is None:
+        reuse_verified_md5 = load_settings(project_root / "filters").reuse_verified_md5
+    records_path = project_root / "filters" / ".verified_md5.json"
+    records = _load_verification_records(records_path) if reuse_verified_md5 else {}
+    logger.info("Existing filter MD5 verification: %s",
+                "reuse matching verification records" if reuse_verified_md5 else "rehash every file")
+    # A failed/interrupted sync must not leave cached trust in a file whose
+    # verification failed. Republish records only after the entire sync succeeds.
+    _write_text_atomic(records_path, json.dumps({"version": 1, "files": {}}))
     report("prepare", 1, 1, status="complete")
 
     downloaded: list[Path] = []
     redownloaded: list[Path] = []
     verified_existing: list[Path] = []
     downloaded_zip_paths: list[Path] = []
+    resolved_locations: dict[str, Path] = {}
+    verified_filters: list[VerifiedFilter] = []
 
     archive_count = len(manifest.current_filter_zips)
     # Each archive has a local-check step and an optional download step. Keep
@@ -192,14 +251,25 @@ def sync_filters(
         check_step = 2 * archive_index
         report("download", check_step, total_steps, f"Checking local filters — {label}")
         local_zip_path = _safe_local_path(filters_dir, entry.path)
+        resolved_locations[entry.path.parent.as_posix()] = local_zip_path.parent
         remote_object_key = f"{REMOTE_FILTERS_PREFIX}/{entry.path.as_posix()}"
 
         with segment("download", check_step, total_steps, label):
-            local_filters_match = _location_filters_match_remote_manifest(
-                downloader=active_downloader,
-                local_zip_path=local_zip_path,
-                zip_manifest_path=entry.path,
-            )
+            if staging_dir is not None:
+                source = (reuse_locations or {}).get(entry.path.parent.as_posix())
+                reused = _verify_reusable_location(manifest, entry, source, records) if source else None
+                local_filters_match = reused is not None
+                if reused is not None:
+                    verified_filters.extend(reused)
+                    resolved_locations[entry.path.parent.as_posix()] = source
+            else:
+                local_filters_match = _location_filters_match_remote_manifest(
+                    downloader=active_downloader,
+                    local_zip_path=local_zip_path,
+                    zip_manifest_path=entry.path,
+                    records=records,
+                    verified=verified_filters,
+                )
         if local_filters_match:
             logger.info(
                 "All filter md5s matched for %s; skipping zip re-download",
@@ -232,12 +302,13 @@ def sync_filters(
         label = f"Archive {index + 1}/{count}: {zip_path.name}"
         report("extract", index, count, label)
         with segment("extract", index, count, label):
-            _extract_zip_archive(zip_path, zip_path.parent)
+            _extract_zip_archive(zip_path, zip_path.parent, durable=staging_dir is not None)
         report("extract", index + 1, count, label,
                status="complete" if index + 1 == count else "pending")
         report("verify", index, count, label)
         with segment("verify", index, count, label):
-            _verify_filters_for_downloaded_zip(manifest=manifest, zip_path=zip_path)
+            _verify_filters_for_downloaded_zip(manifest=manifest, zip_path=zip_path,
+                                              verified=verified_filters)
         report("verify", index + 1, count, label,
                status="complete" if index + 1 == count else "pending")
         zip_path.unlink()
@@ -246,9 +317,25 @@ def sync_filters(
             report(phase, detail="Local filters already verified; no archives needed", status="skipped")
     logger.info("finished filter md5 verification")
 
+    if staging_dir is not None:
+        # Every file selected by the remote manifest must have been verified.
+        location_map = _build_location_map(list(manifest.current_filter_locations))
+        selected = set()
+        for entry in manifest.current_filter_files:
+            relative = _resolve_manifest_filter_path(entry.path.as_posix(), location_map=location_map)
+            location = resolved_locations.get(relative.parent.as_posix())
+            if location is None:
+                raise SyncError(f"No archive location for filter {entry.path}")
+            selected.add((location / relative.name).resolve())
+        if not selected or selected != {entry.path.resolve() for entry in verified_filters}:
+            raise SyncError("The staged filter set does not match the complete remote manifest")
+
     # Publish only a fully verified sync; failed downloads must not select a
     # partial replacement set for manifest generation and cleanup.
     _write_text_atomic(manifest_path, manifest_payload)
+    _write_text_atomic(records_path, json.dumps({"version": 1, "files": {
+        _verification_key(entry.path): entry.record() for entry in verified_filters
+    }}))
 
     return SyncResult(
         manifest_path=manifest_path,
@@ -256,7 +343,46 @@ def sync_filters(
         downloaded=tuple(downloaded),
         redownloaded=tuple(redownloaded),
         verified_existing=tuple(verified_existing),
+        verified_filters=tuple(verified_filters),
     )
+
+
+def _verified_filter(path: Path, expected_md5: str, cached: dict | None = None) -> VerifiedFilter:
+    before = path.stat()
+    # Filesystems without a stable file ID cannot use cached verification.
+    if (isinstance(cached, dict) and before.st_ino != 0 and cached.get("md5") == expected_md5
+            and all(type(cached.get(key)) is int for key in VERIFICATION_METADATA_FIELDS)
+            and file_metadata(before) == tuple(cached[key] for key in VERIFICATION_METADATA_FIELDS)):
+        logger.debug("Reusing verified MD5 for %s", path)
+        return _verified_record(path, expected_md5, before)
+    actual_md5 = calculate_md5(path)
+    if actual_md5 != expected_md5:
+        raise SyncError(f"Filter MD5 mismatch for {path}: expected {expected_md5}, got {actual_md5}")
+    after = path.stat()
+    if file_metadata(before) != file_metadata(after):
+        raise SyncError(f"Filter changed during verification: {path}")
+    return _verified_record(path, expected_md5, after)
+
+
+def _verified_record(path: Path, md5: str, info: os.stat_result) -> VerifiedFilter:
+    return VerifiedFilter(path, md5, info.st_size, info.st_mtime_ns,
+                          info.st_dev, info.st_ino, info.st_ctime_ns)
+
+
+def _verify_reusable_location(manifest, archive, source, records=None):
+    expected = manifest.filter_files_for_location(archive.path.parent.name)
+    if not expected:
+        return None
+    verified = []
+    try:
+        for index, entry in enumerate(expected):
+            report("download", index, len(expected), f"Verifying reusable file {index + 1}/{len(expected)}")
+            path = _resolve_filter_output_path(source, entry.path)
+            verified.append(_verified_filter(path, entry.md5, (records or {}).get(_verification_key(path))))
+        return verified
+    except (OSError, SyncError):
+        logger.warning("Existing location %s failed verification; downloading an isolated replacement", source)
+        return None
 
 
 def calculate_md5(file_path: Path) -> str:
@@ -389,7 +515,7 @@ def _download_verified_file(
     temp_path.replace(destination)
 
 
-def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
+def _extract_zip_archive(zip_path: Path, destination_dir: Path, *, durable: bool = False) -> None:
     with ZipFile(zip_path) as archive:
         file_members = [member for member in archive.infolist() if member.filename and not member.is_dir()]
         total_members = len(file_members)
@@ -416,6 +542,9 @@ def _extract_zip_archive(zip_path: Path, destination_dir: Path) -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member, "r") as source, target_path.open("wb") as destination:
                 shutil.copyfileobj(source, destination)
+                if durable:
+                    destination.flush()
+                    os.fsync(destination.fileno())
             extracted_members += 1
             report("extract", extracted_members, total_members, f"{extracted_members}/{total_members} files extracted")
             _log_local_filter_extraction_progress(
@@ -436,6 +565,8 @@ def _location_filters_match_remote_manifest(
     downloader: ObjectDownloader,
     local_zip_path: Path,
     zip_manifest_path: PurePosixPath,
+    records: dict | None = None,
+    verified: list[VerifiedFilter] | None = None,
 ) -> bool:
     upload_manifest_key = (
         f"{REMOTE_FILTERS_PREFIX}/"
@@ -471,6 +602,7 @@ def _location_filters_match_remote_manifest(
 
     location_dir = local_zip_path.parent
     total_filters = len(upload_manifest.filter_files)
+    checked_filters = []
     report("download", 0, total_filters, f"Checking local filters: 0/{total_filters} verified")
     for completed_checks, entry in enumerate(upload_manifest.filter_files, start=1):
         target_path = _resolve_filter_output_path(location_dir, entry.path)
@@ -485,16 +617,17 @@ def _location_filters_match_remote_manifest(
                 reason="local_filter_missing",
             )
             return False
-        actual_md5 = calculate_md5(target_path)
-        if actual_md5 != entry.md5:
+        try:
+            checked_filters.append(_verified_filter(target_path, entry.md5,
+                (records or {}).get(_verification_key(target_path))))
+        except (OSError, SyncError) as exc:
             _log_upload_manifest_check_failure(
                 zip_path=local_zip_path,
                 upload_manifest_key=upload_manifest_key,
                 target_path=target_path,
                 manifest_filter_path=entry.path,
                 expected_md5=entry.md5,
-                actual_md5=actual_md5,
-                reason="local_filter_md5_mismatch",
+                reason=f"local_filter_verification_failed: {exc}",
             )
             return False
         report("download", completed_checks, total_filters,
@@ -504,6 +637,8 @@ def _location_filters_match_remote_manifest(
             completed_checks=completed_checks,
             total_checks=total_filters,
         )
+    if verified is not None:
+        verified.extend(checked_filters)
     return True
 
 
@@ -511,6 +646,7 @@ def _verify_filters_for_downloaded_zip(
     *,
     manifest: FilterManifest,
     zip_path: Path,
+    verified: list[VerifiedFilter] | None = None,
 ) -> None:
     location_dir = zip_path.parent
     location_name = location_dir.name
@@ -540,6 +676,7 @@ def _verify_filters_for_downloaded_zip(
             failures.append(f"Missing extracted filter: {target_path}")
             continue
 
+        before = target_path.stat()
         actual_md5 = calculate_md5(target_path)
         if actual_md5 != entry.md5:
             _log_filter_md5_failure(
@@ -553,6 +690,11 @@ def _verify_filters_for_downloaded_zip(
             )
             continue
         successful_checks += 1
+        after = target_path.stat()
+        if file_metadata(before) != file_metadata(after):
+            raise SyncError(f"Filter changed during verification: {target_path}")
+        if verified is not None:
+            verified.append(_verified_record(target_path, entry.md5, after))
         report("verify", checked, total_filters, f"{checked}/{total_filters} files checked")
         if not failures:
             _log_local_filter_verification_progress(
@@ -859,6 +1001,12 @@ def _parse_args() -> argparse.Namespace:
         help="Optional path to an env file containing R2 credentials",
     )
     parser.add_argument(
+        "--reuse-verified-md5",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Reuse verified MD5s for unchanged files (default: saved sync setting, otherwise off)",
+    )
+    parser.add_argument(
         "--bucket",
         default=DEFAULT_BUCKET,
         help=f"R2 bucket name. Defaults to {DEFAULT_BUCKET}.",
@@ -874,6 +1022,7 @@ def main() -> int:
             base_dir=args.base_dir,
             env_path=args.env_file,
             bucket=args.bucket,
+            reuse_verified_md5=args.reuse_verified_md5,
         )
     except (R2ClientError, SyncError) as exc:
         print(f"Sync failed: {exc}")

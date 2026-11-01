@@ -82,7 +82,7 @@ def test_manual_phases_reset_and_snapshot_is_independent():
     snapshot["progress"][1]["completed"] = 99
     assert state.snapshot()["progress"][1]["completed"] == 3
     state.start("sync_reload")
-    assert [p["phase"] for p in state.snapshot()["progress"]] == ["reload"]
+    assert [p["phase"] for p in state.snapshot()["progress"]] == ["validate", "reload"]
     assert state.snapshot()["progress"][0]["status"] == "running"
 
 

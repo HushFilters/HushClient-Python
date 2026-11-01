@@ -10,7 +10,6 @@
 .alert-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0 12px; }
 .alert-actions .action-button, #reload-alerts { width: auto; }
 .cooldown-field { max-width: 32rem; }
-select option { background: #14221d; color: #fff; }
 #alert-history { display: grid; gap: 12px; }
 .delivery-attempt { border: 1px solid var(--border-soft); border-radius: 12px; padding: 16px; overflow-wrap: anywhere; }
 .delivery-attempt p { margin-bottom: 0; }

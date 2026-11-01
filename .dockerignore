@@ -15,6 +15,7 @@ tls/
 venv/
 .venv/
 .cache/
+.pytest_cache/
 *.txt.bak
 test_*.tsv
 debug_*.py
@@ -28,3 +29,7 @@ filters/.alerts.json
 filters/.alerts-*.tmp
 filters/.cleanup_state.json
 filters/.cleanup_state.tmp
+filters/.active_manifest.json
+filters/.pending_manifest.json
+filters/.*.tmp
+filters/.generations/
