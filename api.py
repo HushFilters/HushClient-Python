@@ -56,6 +56,7 @@ _auto_update_retry_until: str | None = None
 AUTO_UPDATE_HISTORY_LIMIT = 20
 AUTO_UPDATE_STATE_PATH = "filters/.auto_update_state.json"
 
+
 _auto_update_state_lock = threading.Lock()
 _auto_update_enabled = False
 _auto_update_hour: int | None = None
@@ -908,8 +909,7 @@ async def sync_filters_endpoint():
     """
     Download, verify, and extract filters from nWebbed storage.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     triggered_at = datetime.now().astimezone()
     response: SyncFiltersResponse | None = None
@@ -925,6 +925,7 @@ async def sync_filters_endpoint():
             _record_sync_history("manual", "sync_filters", triggered_at, response)
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.post("/sync/apply", response_model=SyncApplyStartResponse, status_code=202, tags=["Sync"])
@@ -932,8 +933,7 @@ async def sync_apply_endpoint():
     """
     Start filter sync, manifest update, and filter reload in a background thread.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     sync_operation_logs.start("sync_apply")
     try:
@@ -960,8 +960,7 @@ async def update_manifest_endpoint():
     """
     Regenerate manifest.json from the local filters directory.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     try:
         sync_operation_logs.start("sync_manifest")
@@ -973,6 +972,7 @@ async def update_manifest_endpoint():
     finally:
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.post("/sync/reload", response_model=ReloadFiltersResponse, tags=["Sync"])
@@ -980,8 +980,7 @@ async def reload_filters_endpoint():
     """
     Reload manifest/filter files into memory without restarting the API process.
     """
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another filter operation is already in progress")
+    await _acquire_operation_lock()
 
     try:
         sync_operation_logs.start("sync_reload")
@@ -993,6 +992,7 @@ async def reload_filters_endpoint():
     finally:
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.get("/sync/status", response_model=SyncStatusResponse, tags=["Sync"])
@@ -1032,8 +1032,7 @@ async def configure_filter_cleanup(settings: CleanupSettings):
 def _initialize_filter_cleanup() -> dict:
     """Initialize and discover existing files without delaying application readiness."""
     global filter_cleanup
-    if not operation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A filter operation is running. Refresh file totals when it finishes.")
+    operation_lock.acquire()
     try:
         cleanup = FilterCleanup(Path("filters"), Path(os.getenv(
             "HUSHCLIENT_FILTER_CLEANUP_STATE_PATH", "filters/.cleanup_state.json")))
@@ -1047,9 +1046,24 @@ def _initialize_filter_cleanup() -> dict:
         operation_lock.release()
 
 
+async def _acquire_operation_lock():
+    # Waiting requests must not occupy every thread-pool slot: the operation
+    # holding the lock may still need a worker to finish and release it.
+    while not operation_lock.acquire(blocking=False):
+        await asyncio.sleep(0.1)
+
+
 def _inspect_or_delete_superseded_filters(confirmation_token: str | None = None, *, wait: bool = False) -> dict:
     if not operation_lock.acquire(blocking=wait):
         raise HTTPException(status_code=409, detail="A filter operation is in progress; try again when it finishes")
+    try:
+        return _inspect_or_delete_superseded_filters_locked(confirmation_token)
+    finally:
+        operation_lock.release()
+
+
+def _inspect_or_delete_superseded_filters_locked(confirmation_token: str | None = None) -> dict:
+    """Inspect and revalidate deletion with operation_lock held by the caller."""
     try:
         cleanup = filter_cleanup
         if cleanup is None or _is_test_mode_enabled():
@@ -1075,13 +1089,22 @@ def _inspect_or_delete_superseded_filters(confirmation_token: str | None = None,
     except (OSError, ValueError, KeyError, TypeError):
         sync_logger.exception("Could not inspect or delete superseded filters")
         raise HTTPException(status_code=500, detail="Could not inspect or delete superseded filters. Refresh and check diagnostic logs.") from None
-    finally:
-        operation_lock.release()
 
 
 @app.get("/sync/cleanup/files", tags=["Sync"])
 async def get_superseded_filter_inventory():
     return await run_in_threadpool(_inspect_or_delete_superseded_filters)
+
+
+def _scan_cleanup_inventory():
+    if filter_cleanup is None:
+        return _initialize_filter_cleanup()
+    return _inspect_or_delete_superseded_filters(wait=True)
+
+
+def _refresh_cleanup_inventory(*, rerun=True):
+    if not _is_test_mode_enabled():
+        cleanup_inventory_job.start(_scan_cleanup_inventory, rerun=rerun)
 
 
 @app.post("/sync/cleanup/files/refresh", status_code=202, tags=["Sync"])
@@ -1091,8 +1114,7 @@ async def refresh_superseded_filter_inventory():
         return cleanup_inventory_job.snapshot()
     if _is_test_mode_enabled():
         raise HTTPException(status_code=503, detail="Filter cleanup is unavailable (or test mode is enabled)")
-    cleanup_inventory_job.start(_initialize_filter_cleanup if filter_cleanup is None
-                                else lambda: _inspect_or_delete_superseded_filters(wait=True))
+    _refresh_cleanup_inventory(rerun=False)
     return cleanup_inventory_job.snapshot()
 
 
@@ -1104,7 +1126,13 @@ async def superseded_filter_inventory_status():
 @app.post("/sync/cleanup/delete", tags=["Sync"])
 async def delete_superseded_filters(request: CleanupDeleteRequest):
     """Delete the confirmed set of superseded filters, regardless of retention settings."""
-    return await run_in_threadpool(_inspect_or_delete_superseded_filters, request.confirmation_token)
+    await _acquire_operation_lock()
+    try:
+        return await run_in_threadpool(_inspect_or_delete_superseded_filters_locked,
+                                     request.confirmation_token)
+    finally:
+        operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 @app.put("/sync/auto-update", response_model=AutoUpdateStatusResponse, tags=["Sync"])
@@ -1322,6 +1350,7 @@ def _run_sync_apply_background_job() -> None:
             _record_sync_history("manual", "sync_apply", triggered_at, response)
         sync_operation_logs.finish()
         operation_lock.release()
+        _refresh_cleanup_inventory()
 
 
 def _filter_call(method, *args):
@@ -1761,22 +1790,7 @@ def _run_scheduled_auto_update() -> SyncApplyResponse | None:
     global _auto_update_active_since
 
     triggered_at = datetime.now().astimezone()
-    if not operation_lock.acquire(blocking=False):
-        logger.info("Skipping scheduled auto update because another filter operation is already in progress")
-        completed_at = datetime.now().astimezone()
-        _append_auto_update_history({
-            "triggered_at": triggered_at.isoformat(timespec="seconds"),
-            "completed_at": completed_at.isoformat(timespec="seconds"),
-            "status": "skipped",
-            "trigger": "scheduled",
-            "operation": "sync_apply",
-            "filter_count": 0,
-            "detail": "Another filter operation was already in progress",
-            "downloaded": [],
-            "redownloaded": [],
-            "verified_existing": [],
-        })
-        return
+    operation_lock.acquire()
 
     response: SyncApplyResponse | None = None
     try:
@@ -1809,6 +1823,7 @@ def _run_scheduled_auto_update() -> SyncApplyResponse | None:
         with _auto_update_state_lock:
             _auto_update_active_since = None
         operation_lock.release()
+        _refresh_cleanup_inventory()
     return response
 
 

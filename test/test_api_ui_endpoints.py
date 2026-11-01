@@ -7,11 +7,13 @@ import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
 
 import api
+from filter_sync.inventory_job import InventoryJob
 from filter_sync.sync import SyncResult
 
 
@@ -52,6 +54,8 @@ def isolate_auto_update_state(monkeypatch, tmp_path: Path) -> None:
     # These endpoint tests do not exercise filesystem discovery. Its background
     # startup and concurrency behavior have dedicated inventory-job tests.
     monkeypatch.setattr(api, "_initialize_filter_cleanup", lambda: {})
+    monkeypatch.setattr(api, "_scan_cleanup_inventory", lambda: {})
+    monkeypatch.setattr(api, "cleanup_inventory_job", InventoryJob())
     monkeypatch.setattr(api.activation, "stage_sync", lambda sync, paths: sync())
     monkeypatch.setattr(api.activation, "load_candidate", lambda current: (
         Path("manifest.json"), {"filters": ["filters/new.hf"]}, False))
@@ -59,6 +63,8 @@ def isolate_auto_update_state(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(api.activation, "check_identities", lambda payload: None)
     monkeypatch.setattr(api.activation, "validate_groups", lambda *args, **kwargs: 1)
     monkeypatch.setattr(api.activation, "inspect_retained_groups", lambda *args: None)
+    yield
+    api.cleanup_inventory_job.join()
 
 
 def test_root_and_ui_endpoints(monkeypatch) -> None:
@@ -633,7 +639,7 @@ def test_run_scheduled_auto_update_executes_sync_apply(monkeypatch, tmp_path: Pa
     assert persisted["history"][0]["status"] == "success"
 
 
-def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch, tmp_path: Path) -> None:
+def test_run_scheduled_auto_update_waits_when_operation_in_progress(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
     def fake_sync_apply() -> api.SyncApplyResponse:
@@ -644,15 +650,16 @@ def test_run_scheduled_auto_update_skips_when_operation_in_progress(monkeypatch,
     monkeypatch.setenv("AUTO_UPDATE_STATE_PATH", str(tmp_path / "auto-update.json"))
     api._load_auto_update_state()
 
-    assert api.operation_lock.acquire(blocking=False)
-    try:
-        api._run_scheduled_auto_update()
-    finally:
-        api.operation_lock.release()
+    with ThreadPoolExecutor() as pool:
+        with api.operation_lock:
+            pending = pool.submit(api._run_scheduled_auto_update)
+            assert not pending.done()
+            assert calls == []
+        assert pending.result(timeout=5).success
 
-    assert calls == []
+    assert calls == ["sync_apply"]
     history = api._auto_update_status_snapshot()["history"]
-    assert history[0]["status"] == "skipped"
+    assert history[0]["status"] == "success"
 
 
 def test_auto_update_api_manages_and_persists_schedule(monkeypatch, tmp_path: Path) -> None:

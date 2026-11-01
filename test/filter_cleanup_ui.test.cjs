@@ -7,7 +7,7 @@ const { runInNewContext } = require("node:vm");
 function setup() {
   const elements = Object.fromEntries([
     "cleanup-mode", "cleanup-days", "cleanup-days-field", "cleanup-save", "cleanup-message",
-    "cleanup-count", "cleanup-size", "cleanup-delete", "cleanup-files-message", "cleanup-files-refresh",
+    "cleanup-count", "cleanup-size", "cleanup-checked-at", "cleanup-delete", "cleanup-files-message", "cleanup-files-refresh",
   ].map(id => [id, {}]));
   elements["history-toggle"] = { addEventListener() {} };
   const requests = [];
@@ -87,7 +87,9 @@ test("confirmation sends the snapshot token and updates totals after deletion", 
     requests.push({ url, options });
     const result = url.endsWith("/delete")
       ? { filter_count: 0, total_bytes: 0, deleted_count: 2, deleted_bytes: 4096 }
-      : { active: false, inventory: { filter_count: 2, total_bytes: 4096, confirmation_token: "snapshot" } };
+      : { active: false, inventory: url.endsWith("/status")
+        ? { filter_count: 0, total_bytes: 0, confirmation_token: "empty" }
+        : { filter_count: 2, total_bytes: 4096, confirmation_token: "snapshot" } };
     return { ok: true, text: async () => JSON.stringify(result) };
   };
   await context.deleteSupersededFilters();
@@ -152,4 +154,85 @@ test("failed background refresh preserves displayed totals but disables deletion
   assert.equal(elements["cleanup-delete"].disabled, true);
   assert.equal(elements["cleanup-files-refresh"].disabled, false);
   assert.match(elements["cleanup-files-message"].textContent, /Scan failed.*out of date/);
+});
+
+test("page visits reuse cached totals and their last successful check time", async () => {
+  const { context, elements } = setup();
+  const requests = [];
+  const checkedAt = "2026-11-01T02:03:04+00:00";
+  context.fetch = async url => {
+    requests.push(url);
+    return { ok: true, text: async () => JSON.stringify({ active: false, checked_at: checkedAt,
+      inventory: { filter_count: 7, total_bytes: 700, confirmation_token: "cached" } }) };
+  };
+  await context.loadCleanupInventory();
+  await context.loadCleanupInventory();
+  assert.deepEqual(requests, ["/sync/cleanup/files/status", "/sync/cleanup/files/status"]);
+  assert.equal(elements["cleanup-count"].textContent, "7");
+  assert.equal(elements["cleanup-checked-at"].textContent, new Date(checkedAt).toLocaleString());
+});
+
+test("an empty cache does not start a scan on page load", async () => {
+  const { context, elements } = setup();
+  const requests = [];
+  context.fetch = async url => {
+    requests.push(url);
+    return { ok: true, text: async () => JSON.stringify({ active: false, inventory: null, checked_at: null }) };
+  };
+  await context.loadCleanupInventory();
+  assert.deepEqual(requests, ["/sync/cleanup/files/status"]);
+  assert.equal(elements["cleanup-checked-at"].textContent, "Never checked");
+  assert.equal(elements["cleanup-delete"].disabled, true);
+});
+
+test("cached totals appear immediately while an existing scan is running", async () => {
+  const { context, elements } = setup();
+  const checkedAt = "2026-11-01T02:03:04+00:00";
+  let resume;
+  let active = true;
+  context.setTimeout = callback => { resume = callback; };
+  context.fetch = async () => ({ ok: true, text: async () => JSON.stringify({ active, checked_at: checkedAt,
+    inventory: { filter_count: active ? 7 : 8, total_bytes: 700, confirmation_token: "cached" } }) });
+  const loaded = context.loadCleanupInventory();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(elements["cleanup-count"].textContent, "7");
+  assert.equal(elements["cleanup-checked-at"].textContent, new Date(checkedAt).toLocaleString());
+  assert.equal(elements["cleanup-delete"].disabled, true);
+  active = false;
+  resume();
+  await loaded;
+  assert.equal(elements["cleanup-count"].textContent, "8");
+});
+
+test("a manual refresh during a cached read still requests a scan", async () => {
+  const { context } = setup();
+  const requests = [];
+  let release;
+  const cachedRead = new Promise(resolve => { release = resolve; });
+  context.fetch = async url => {
+    requests.push(url);
+    if (url.endsWith("/status")) await cachedRead;
+    return { ok: true, text: async () => JSON.stringify({ active: false,
+      inventory: { filter_count: 7, total_bytes: 700, confirmation_token: "cached" } }) };
+  };
+  const load = context.loadCleanupInventory();
+  const refresh = context.refreshCleanupInventory();
+  release();
+  await Promise.all([load, refresh]);
+  assert.deepEqual(requests, ["/sync/cleanup/files/status", "/sync/cleanup/files/refresh"]);
+});
+
+test("cached totals recover after a temporary status failure", async () => {
+  const { context, elements } = setup();
+  const status = { active: false, checked_at: "2026-11-01T02:03:04+00:00",
+    inventory: { filter_count: 7, total_bytes: 700, confirmation_token: "cached" } };
+  context.fetch = async () => ({ ok: true, text: async () => JSON.stringify(status) });
+  await context.loadCleanupInventory();
+  context.fetch = async () => { throw new Error("Connection lost"); };
+  await context.loadCleanupInventory();
+  assert.equal(elements["cleanup-count"].textContent, "7");
+  assert.equal(elements["cleanup-delete"].disabled, true);
+  context.fetch = async () => ({ ok: true, text: async () => JSON.stringify(status) });
+  await context.loadCleanupInventory();
+  assert.equal(elements["cleanup-delete"].disabled, false);
 });

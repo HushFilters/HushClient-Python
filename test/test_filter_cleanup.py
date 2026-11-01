@@ -1,5 +1,6 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,15 @@ from fastapi.testclient import TestClient
 
 import api
 from filter_sync.cleanup import CleanupSettings, FilterCleanup
+from filter_sync.inventory_job import InventoryJob
+
+
+@pytest.fixture(autouse=True)
+def isolate_inventory_job(monkeypatch):
+    job = InventoryJob()
+    monkeypatch.setattr(api, "cleanup_inventory_job", job)
+    yield job
+    job.join()
 
 
 @pytest.fixture
@@ -239,7 +249,7 @@ def manual_client(setup_cleanup, monkeypatch):
     return TestClient(api.app), cleanup, old, new, untracked
 
 
-def test_inventory_and_confirmed_delete_work_with_automatic_cleanup_off(manual_client):
+def test_inventory_and_confirmed_delete_work_with_automatic_cleanup_off(manual_client, isolate_inventory_job):
     client, cleanup, old, new, untracked = manual_client
     inventory = client.get("/sync/cleanup/files").json()
     assert inventory["filter_count"] == 1
@@ -253,16 +263,22 @@ def test_inventory_and_confirmed_delete_work_with_automatic_cleanup_off(manual_c
     assert result.json()["filter_count"] == result.json()["total_bytes"] == 0
     assert not old.exists() and new.exists() and untracked.exists()
     assert not cleanup.settings.enabled
+    isolate_inventory_job.join()
+    snapshot = isolate_inventory_job.snapshot()
+    assert snapshot["inventory"]["filter_count"] == 0
+    assert snapshot["checked_at"] and snapshot["error"] is None
 
 
-def test_manual_delete_rejects_changed_set_and_concurrent_sync(manual_client):
+def test_manual_delete_waits_for_sync_and_rejects_changed_set(manual_client):
     client, cleanup, old, new, _ = manual_client
     token = client.get("/sync/cleanup/files").json()["confirmation_token"]
-    with api.operation_lock:
-        assert client.post("/sync/cleanup/delete", json={"confirmation_token": token}).status_code == 409
-        assert client.get("/sync/cleanup/files").status_code == 409
-    old.write_bytes(b"replacement download")
-    assert client.post("/sync/cleanup/delete", json={"confirmation_token": token}).status_code == 409
+    with ThreadPoolExecutor() as pool:
+        with api.operation_lock:
+            pending = pool.submit(client.post, "/sync/cleanup/delete", json={"confirmation_token": token})
+            assert client.get("/sync/cleanup/files").status_code == 409
+            assert not pending.done()
+            old.write_bytes(b"replacement download")
+        assert pending.result(timeout=5).status_code == 409
     assert old.exists() and new.exists()
     assert client.get("/sync/cleanup/files").json()["filter_count"] == 0
 

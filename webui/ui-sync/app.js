@@ -467,7 +467,7 @@ async function runOperation({ endpoint, inProgress, success, failure, onSuccess 
     localOperationRunning = false;
     setButtonsDisabled(false);
     await pollLiveStatus();
-    await refreshCleanupInventory();
+    await loadCleanupInventory();
   }
 }
 
@@ -510,13 +510,14 @@ async function runBackgroundApplyOperation({ endpoint, operation, inProgress, su
     localOperationRunning = false;
     setButtonsDisabled(false);
     await pollLiveStatus();
-    await refreshCleanupInventory();
+    await loadCleanupInventory();
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   void loadCleanupSettings();
-  void refreshCleanupInventory();
+  void loadCleanupInventory();
+  window.setInterval(() => { if (!document.hidden) void loadCleanupInventory(); }, 5000);
   document.getElementById("cleanup-delete").addEventListener("click", deleteSupersededFilters);
   document.getElementById("cleanup-files-refresh").addEventListener("click", () => { void refreshCleanupInventory(); });
   document.getElementById("cleanup-mode").addEventListener("change", syncCleanupDaysAvailability);
@@ -607,43 +608,71 @@ function showCleanupInventory(inventory) {
 }
 
 let cleanupRefreshPromise = null;
+let cleanupRefreshRequestsScan = false;
+let cleanupStatusSignature = null;
 
-function refreshCleanupInventory() {
+function loadCleanupInventory() {
+  return refreshCleanupInventory(false);
+}
+
+function refreshCleanupInventory(requestScan = true) {
+  if (cleanupRefreshPromise && requestScan && !cleanupRefreshRequestsScan) {
+    // A cached status read cannot satisfy an explicit request for a new scan.
+    return cleanupRefreshPromise.then(() => refreshCleanupInventory(true));
+  }
   if (!cleanupRefreshPromise) {
-    cleanupRefreshPromise = runCleanupInventoryRefresh().finally(() => {
+    cleanupRefreshRequestsScan = requestScan;
+    cleanupRefreshPromise = runCleanupInventoryRefresh(requestScan).finally(() => {
       cleanupRefreshPromise = null;
+      cleanupRefreshRequestsScan = false;
     });
   }
   return cleanupRefreshPromise;
 }
 
-async function runCleanupInventoryRefresh() {
+async function runCleanupInventoryRefresh(requestScan) {
   const message = document.getElementById("cleanup-files-message");
   const refresh = document.getElementById("cleanup-files-refresh");
   const deleteButton = document.getElementById("cleanup-delete");
-  refresh.disabled = true;
-  refresh.textContent = "Scanning…";
-  deleteButton.disabled = true;
-  message.textContent = "Scanning superseded filters in the background (waiting if a filter operation is running). Previous totals remain visible.";
-  message.className = "status";
+  function scanning() {
+    refresh.disabled = true;
+    refresh.textContent = "Scanning…";
+    deleteButton.disabled = true;
+    message.textContent = "Scanning superseded filters (waiting for any running filter operation). Previous totals remain visible.";
+    message.className = "status";
+  }
+  if (requestScan) scanning();
   try {
-    let response = await fetch("/sync/cleanup/files/refresh", { method: "POST" });
+    let response = await fetch(requestScan ? "/sync/cleanup/files/refresh" : "/sync/cleanup/files/status",
+      requestScan ? { method: "POST" } : { cache: "no-store" });
     let status = await readResponsePayload(response);
-    if (!response.ok) throw new Error(status.detail || "Could not start file totals scan");
-    while (status.active) {
+    if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
+    const signature = JSON.stringify(status);
+    if (!requestScan && !status.active && signature === cleanupStatusSignature) return cleanupInventory;
+    for (;;) {
+      if (status.inventory) showCleanupInventory(status.inventory);
+      setText("cleanup-checked-at", status.checked_at ? formatHistoryTime(status.checked_at) : "Never checked");
+      if (!status.active) break;
+      scanning();
       await new Promise(resolve => setTimeout(resolve, 1000));
       response = await fetch("/sync/cleanup/files/status", { cache: "no-store" });
       status = await readResponsePayload(response);
       if (!response.ok) throw new Error(status.detail || "Could not read file totals scan status");
     }
+    cleanupStatusSignature = JSON.stringify(status);
     if (status.error) throw new Error(status.error);
-    if (!status.inventory) throw new Error("No file totals returned. Please refresh again.");
-    showCleanupInventory(status.inventory);
+    if (!status.inventory) {
+      cleanupInventory = null;
+      message.textContent = "No cached totals. Use Refresh file totals to check.";
+      message.className = "status";
+      return null;
+    }
     if (document.getElementById("cleanup-mode").disabled) void loadCleanupSettings();
-    message.textContent = "File totals refreshed.";
+    message.textContent = requestScan ? "File totals refreshed." : "Showing the last checked file totals.";
     message.className = "status ok";
     return status.inventory;
   } catch (error) {
+    cleanupStatusSignature = null;
     cleanupInventory = null;
     // Keep the previous numbers visible, but never permit deletion using a stale token.
     message.textContent = `${error.message || String(error)} Previous totals may be out of date.`;
@@ -678,7 +707,7 @@ async function deleteSupersededFilters() {
     });
     const result = await readResponsePayload(response);
     if (!response.ok) throw new Error(result.detail || "Could not delete superseded filters");
-    showCleanupInventory(result);
+    await loadCleanupInventory();
     message.textContent = `Deleted ${result.deleted_count.toLocaleString()} superseded filters (${formatFilterBytes(result.deleted_bytes)}).`
       + (result.filter_count ? ` ${result.filter_count.toLocaleString()} remain; check diagnostic logs and retry.` : "");
     message.className = result.filter_count ? "status bad" : "status ok";
